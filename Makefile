@@ -18,3 +18,10 @@ backend-test:
 
 frontend-test:
 	cd frontend && npm test
+
+.PHONY: docker-build docker-run
+docker-build:
+	docker build -t wswe .
+
+docker-run:
+	docker run --rm -p 8000:8000 -v wswe-data:/data wswe

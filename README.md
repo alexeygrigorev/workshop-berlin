@@ -22,3 +22,20 @@ poll is open; omit it for real time.
 - Browser origin must be in the backend CORS allowlist (`WSWE_CORS_ORIGINS`, default includes 5173, 8080, 3000). If Vite picks
   another port, e.g. `WSWE_CORS_ORIGINS=http://localhost:8081`.
 - API contract: `api/openapi.yaml`; see `api/README.md` and `backend/README.md`.
+
+## Docker
+
+One image, one port: a multi-stage build compiles the frontend as a static SPA (`npm run build:static`) and the
+FastAPI backend serves it together with the API (`WSWE_STATIC_DIR`).
+
+```sh
+make docker-build   # docker build -t wswe .
+make docker-run     # docker run -p 8000:8000 -v wswe-data:/data wswe  -> http://localhost:8000
+```
+
+- SQLite lives at `/data/wswe.db` (volume `wswe-data`). Demo data is seeded into an empty DB; disable with
+  `-e WSWE_SEED_DEMO_DATA=false`. Sign in as `anna@example.com` / `password123`.
+- If you publish on another host/port, set `-e WSWE_APP_ORIGIN=https://your.host -e WSWE_CORS_ORIGINS=https://your.host`
+  (invite links are built from `WSWE_APP_ORIGIN`); behind HTTPS also `-e WSWE_COOKIE_SECURE=true`.
+- Static frontend build without Docker: `cd frontend && npm run build:static` -> `frontend/dist/client`
+  (`npm run build` still produces the SSR/Nitro build).
