@@ -1,0 +1,15 @@
+# DOMAIN comes from the environment (deploy/.env). Caddy obtains and renews the TLS certificate itself.
+{$DOMAIN} {
+	encode zstd gzip
+
+	reverse_proxy app:8000 {
+		# Do not buffer: Server-Sent Events (/v1/.../events) must reach the browser immediately.
+		flush_interval -1
+		# No response timeout (Caddy sets none by default); fail fast only when the app is down.
+		transport http {
+			dial_timeout 5s
+			response_header_timeout 0
+			read_timeout 0
+		}
+	}
+}
