@@ -56,6 +56,59 @@ dc exec -T db pg_dump -U wswe wswe > backup-$(date +%F).sql     # backup
 dc exec -T db psql -U wswe wswe < backup.sql                    # restore (into an empty db)
 ```
 
+## CI/CD (GitHub Actions)
+
+`.github/workflows/ci-cd.yml` runs on every push to `main`, every pull request to `main`, and manually
+(Actions tab, "Run workflow"). Jobs:
+
+- `backend-tests`: pytest on SQLite and on a Postgres 16 service container.
+- `frontend-tests`: `npm test`, `tsc --noEmit`, `npm run build`, `npm run build:static`.
+- `e2e`: Playwright against its own throw-away docker compose stack (report uploaded as an artifact on failure).
+- `docker-build`: builds the root `Dockerfile` (no push).
+- `deploy`: only on `main` (push or manual run) and only if all of the above passed. It uploads the tree
+  (`git archive`, so no git clone is needed on the server) with `deploy/deploy.sh`, runs
+  `docker compose ... up -d --build --wait`, prunes dangling images, then checks that `$DEPLOY_URL/v1/health`
+  returns 200 (retries for about 2 minutes). `deploy/.env` and the database volume on the server are never touched.
+  The deployed commit is written to `.deployed-sha` on the server (the previous one to `.previous-sha`).
+
+Complete steps 1 to 5 above first (Docker installed, `deploy/.env` created in `/root/workshop-berlin`). The server does
+not need a git clone; the workflow replaces the code in that directory.
+
+### Secrets and variables (Settings > Secrets and variables > Actions)
+
+| Name | Kind | Meaning |
+| --- | --- | --- |
+| `DEPLOY_HOST` | secret | server IP or hostname |
+| `DEPLOY_USER` | secret | SSH user (e.g. `root`) |
+| `DEPLOY_SSH_KEY` | secret | private key (OpenSSH, passwordless), full file contents |
+| `DEPLOY_KNOWN_HOSTS` | secret, optional | the server's host key line(s), pins the host; recommended |
+| `DEPLOY_PATH` | variable (or secret), optional | checkout dir on the server, default `/root/workshop-berlin` |
+| `DEPLOY_URL` | variable | public URL for the health check, e.g. `https://203-0-113-7.sslip.io` |
+
+Create a dedicated deploy key (do not reuse a personal key):
+
+```bash
+ssh-keygen -t ed25519 -f deploy_key -N "" -C "github-actions-deploy"
+ssh-copy-id -i deploy_key.pub root@203.0.113.7     # or append deploy_key.pub to ~/.ssh/authorized_keys on the server
+ssh-keyscan -t ed25519 203.0.113.7                  # paste the output into DEPLOY_KNOWN_HOSTS (verify it against the server console if you can)
+```
+
+Paste the contents of `deploy_key` into `DEPLOY_SSH_KEY`, then delete the local `deploy_key` files.
+Without `DEPLOY_KNOWN_HOSTS` the script runs `ssh-keyscan` at deploy time, which works but trusts whatever answers
+(no protection against a man-in-the-middle).
+
+Optional: create a `production` environment (Settings > Environments) with required reviewers, so every deploy needs an
+approval. The `deploy` job already uses `environment: production` (GitHub creates it on first use if missing).
+
+### Running and watching
+
+- Manual run: Actions > CI/CD > Run workflow (branch `main`), or `gh workflow run ci-cd.yml --ref main`.
+- Logs: the run page in the Actions tab (one log per job); on the server `dc logs -f app caddy`.
+- Rollback: the workflow only deploys the latest `main`:
+  revert the commit on `main`, or check out `.previous-sha` locally and run `deploy/deploy.sh` by hand.
+- Caveat: the image is built on the server (1 vCPU / 2 GB), so a deploy takes a few minutes. Runs are queued, never
+  cancelled, once on `main`.
+
 ## Tear down
 
 After the workshop delete the server in the Hetzner console (stops billing and destroys the data).
