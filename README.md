@@ -26,6 +26,20 @@ poll is open; omit it for real time.
   another port, e.g. `WSWE_CORS_ORIGINS=http://localhost:8081`.
 - API contract: `api/openapi.yaml`; see `api/README.md` and `backend/README.md`.
 
+## PostgreSQL (optional)
+
+SQLite is the default; PostgreSQL works too (driver `psycopg[binary]` is installed with the backend).
+
+```sh
+make db-up        # start postgres:16-alpine as container wswe-db (idempotent; volume wswe_pgdata keeps the data)
+make backend-pg   # backend on :8000 against it (postgresql+psycopg://wswe:wswe@localhost:5432/wswe), migrates first
+make db-psql      # psql shell;  make db-down  stops the container (data kept)
+```
+
+Migrations: `cd backend && WSWE_DATABASE_URL=... uv run alembic upgrade head` (auto-migrate is off by default for
+non-SQLite; set `WSWE_AUTO_MIGRATE=true` to enable). Run the tests on Postgres with
+`WSWE_TEST_DATABASE_URL=postgresql+psycopg://wswe:wswe@localhost:5432/wswe make backend-test`. Details: `backend/README.md`.
+
 ## Docker
 
 One image, one port: a multi-stage build compiles the frontend as a static SPA (`npm run build:static`) and the
@@ -40,5 +54,9 @@ make docker-run     # docker run -p 8000:8000 -v wswe-data:/data wswe  -> http:/
   `-e WSWE_SEED_DEMO_DATA=false`. Sign in as `anna@example.com` / `password123`.
 - If you publish on another host/port, set `-e WSWE_APP_ORIGIN=https://your.host -e WSWE_CORS_ORIGINS=https://your.host`
   (invite links are built from `WSWE_APP_ORIGIN`); behind HTTPS also `-e WSWE_COOKIE_SECURE=true`.
+- Against PostgreSQL instead of SQLite (container from `make db-up`; migrations are not automatic there, so run
+  `WSWE_AUTO_MIGRATE=true` or `alembic upgrade head` first):
+  `docker run --rm -p 8000:8000 -e WSWE_AUTO_MIGRATE=true -e WSWE_DATABASE_URL=postgresql+psycopg://wswe:wswe@host.docker.internal:5432/wswe wswe`
+  (on Linux add `--add-host=host.docker.internal:host-gateway`).
 - Static frontend build without Docker: `cd frontend && npm run build:static` -> `frontend/dist/client`
   (`npm run build` still produces the SSR/Nitro build).

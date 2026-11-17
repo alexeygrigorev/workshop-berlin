@@ -1,7 +1,7 @@
 # Where Should We Eat? - backend
 
 FastAPI implementation of [`../api/openapi.yaml`](../api/openapi.yaml) (all 40 operations) persisted in a
-**SQL database via SQLAlchemy 2.0** (SQLite by default, schema managed by Alembic) and seeded with demo data on
+**SQL database via SQLAlchemy 2.0** (SQLite by default, PostgreSQL supported, schema managed by Alembic) and seeded with demo data on
 first start. Data survives restarts.
 Dependencies are managed with [uv](https://docs.astral.sh/uv/) (`pyproject.toml` + `uv.lock`).
 
@@ -11,7 +11,7 @@ Dependencies are managed with [uv](https://docs.astral.sh/uv/) (`pyproject.toml`
 cd backend
 uv sync                                                    # creates .venv (gitignored), installs pinned deps incl. dev group
 uv run uvicorn app.main:create_app --factory --port 8000   # http://localhost:8000 (docs at /docs)
-uv run pytest                                              # 79 tests (each on a fresh temp SQLite file)
+uv run pytest                                              # all tests (each on a fresh temp SQLite file; see Testing on PostgreSQL)
 uv run alembic upgrade head                                # apply migrations by hand (see Database below)
 ```
 
@@ -56,7 +56,7 @@ curl -X POST localhost:8000/v1/auth/sign-in -H 'content-type: application/json' 
 | `WSWE_CORS_ORIGINS` | `http://localhost:8080,http://localhost:5173,http://localhost:3000` | comma separated CORS allowlist; also the origins trusted for cookie-authenticated unsafe requests |
 | `WSWE_APP_ORIGIN` | first CORS origin | base for invite URLs (`<origin>/join/<token>`) |
 | `WSWE_COOKIE_SECURE` | `false` | set `true` behind HTTPS (the `wswe_session` cookie is always HttpOnly, SameSite=Lax) |
-| `WSWE_DATABASE_URL` | `sqlite:///./wswe.db` | SQLAlchemy URL of the database (the SQLite file is gitignored) |
+| `WSWE_DATABASE_URL` | `sqlite:///./wswe.db` | SQLAlchemy URL of the database (the SQLite file is gitignored); `postgresql://`, `postgres://` and `postgresql+psycopg://` all work (see PostgreSQL) |
 | `WSWE_AUTO_MIGRATE` | unset = `true` for SQLite, `false` otherwise | run `alembic upgrade head` at startup |
 | `WSWE_SEED_DEMO_DATA` | `true` | seed demo data at startup, only if the database has no users (never from an endpoint) |
 | `WSWE_SCHEDULER_INTERVAL_SECONDS` | `30` | background tick that creates/opens/finalizes polls (`0` = off; reads also reconcile lazily) |
@@ -79,6 +79,33 @@ curl -X POST localhost:8000/v1/auth/sign-in -H 'content-type: application/json' 
   SQLite); finalization re-checks `finalized_at` after taking that lock, so it is idempotent; teams/restaurants use
   a version column (`UPDATE ... WHERE version = old`, stale writes give `412`).
 - Tokens: only SHA-256 hashes of session and personal API tokens are stored.
+
+### PostgreSQL
+
+The driver (`psycopg[binary]`, psycopg 3) is a regular dependency. From the repo root, `make db-up` starts a
+`postgres:16-alpine` container (`wswe-db`, user/password/db `wswe`, port 5432, volume `wswe_pgdata`; idempotent),
+`make db-psql` opens psql, `make db-down` stops it (data stays in the volume).
+
+```sh
+export WSWE_DATABASE_URL=postgresql+psycopg://wswe:wswe@localhost:5432/wswe   # postgresql:// or postgres:// also work
+uv run alembic upgrade head          # AUTO_MIGRATE is off by default for non-SQLite: run this as a deploy step ...
+# ... or set WSWE_AUTO_MIGRATE=true to upgrade at startup (fine for a single instance)
+uv run uvicorn app.main:create_app --factory --port 8000      # or: make backend-pg
+```
+
+`postgres://` / `postgresql://` URLs are rewritten to `postgresql+psycopg://` (`app/db/session.py`). The pool uses
+`pool_pre_ping` and a 30 minute `pool_recycle`.
+
+### Testing on PostgreSQL
+
+```sh
+make db-up
+WSWE_TEST_DATABASE_URL=postgresql+psycopg://wswe:wswe@localhost:5432/wswe uv run pytest
+```
+
+Each test creates its own throw-away database (`wswe_test_<random>`) on that server and drops it afterwards; the
+database in the URL (your `wswe` data) is only used to connect and is never touched. The role needs `CREATEDB`
+(the container's `wswe` superuser has it). Without the variable the suite runs on temp SQLite files as before.
 
 ## Layout
 
@@ -124,7 +151,6 @@ tests/           pytest + httpx TestClient; every response is validated against 
   refetch on `resync`). Use a shared broker (e.g. Postgres LISTEN/NOTIFY or Redis) to scale out.
 - The scheduler tick runs in every process (it is idempotent and row-locked, so that is safe, just redundant).
 - A lost race on a reused `Idempotency-Key` surfaces as a 500 instead of a replay.
-- Postgres is not exercised by the tests (only SQLite); see the portability notes in the code comments.
 
 ## Serving the frontend (optional)
 
