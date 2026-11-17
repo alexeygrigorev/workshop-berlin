@@ -100,7 +100,7 @@ jobs:
       - name: Smoke test (SQLite, no seed)
         run: |
           docker run -d --name smoke -p 8000:8000 -e WSWE_DATABASE_URL=sqlite:///:memory:             -e WSWE_AUTO_MIGRATE=true -e WSWE_SEED_DEMO_DATA=false "$IMAGE_TAG"
-          for i in $(seq 1 30); do
+          for _ in $(seq 1 30); do
             curl -fsS http://localhost:8000/v1/health && exit 0
             sleep 2
           done
@@ -115,8 +115,8 @@ jobs:
           docker save "$IMAGE_TAG" | gzip -n > out/wswe-image.tar.gz
           image_id="$(docker image inspect --format '{{.Id}}' "$IMAGE_TAG")"
           tar_sha256="$(sha256sum out/wswe-image.tar.gz | cut -d' ' -f1)"
-          printf '{"image_tag":"%s","image_id":"%s","tar_sha256":"%s","commit":"%s"}
-'             "$IMAGE_TAG" "$image_id" "$tar_sha256" "$GITHUB_SHA" > out/image-manifest.json
+          printf '{"image_tag":"%s","image_id":"%s","tar_sha256":"%s","commit":"%s"}\n' \
+            "$IMAGE_TAG" "$image_id" "$tar_sha256" "$GITHUB_SHA" > out/image-manifest.json
           cat out/image-manifest.json
           ls -lh out
           {
