@@ -30,7 +30,7 @@ services:
     environment:
       WSWE_DATABASE_URL: postgresql+psycopg://wswe:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD in deploy/.env}@db:5432/wswe
       WSWE_AUTO_MIGRATE: "true"
-      WSWE_SEED_DEMO_DATA: ${WSWE_SEED_DEMO_DATA:-true}
+      WSWE_SEED_DEMO_DATA: ${WSWE_SEED_DEMO_DATA:-false}
       WSWE_APP_ORIGIN: https://${DOMAIN:?set DOMAIN in deploy/.env}
       WSWE_CORS_ORIGINS: https://${DOMAIN}
       WSWE_COOKIE_SECURE: "true"

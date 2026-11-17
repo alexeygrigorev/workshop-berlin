@@ -33,7 +33,7 @@ nano deploy/.env        # set DOMAIN=203-0-113-7.sslip.io (your IP, dashes)
 docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --build
 ```
 
-The first start builds the image (a few minutes), runs migrations and seeds demo data into the empty database.
+The first start builds the image (a few minutes), runs migrations and starts with an empty database (set `WSWE_SEED_DEMO_DATA=true` in `deploy/.env` first if you want the demo users).
 
 ## 5. Check
 
@@ -41,7 +41,7 @@ The first start builds the image (a few minutes), runs migrations and seeds demo
 curl https://$DOMAIN/v1/health        # {"status":"ok",...}
 ```
 
-Open `https://<DOMAIN>` and sign in as `anna@example.com` / `password123`.
+Open `https://<DOMAIN>` and create an account (or, with demo data enabled, sign in as `anna@example.com` / `password123`).
 If the certificate is not issued, check that ports 80/443 are open in the firewall and `DOMAIN` matches the IP.
 
 ## Operate
@@ -63,7 +63,8 @@ To only stop the stack: `dc down` (add `-v` to also delete the database volume a
 
 ## Security notes
 
-- All demo users share the known password `password123`; anyone who finds the URL can sign in. Tear the server down
-  after the workshop, or set `WSWE_SEED_DEMO_DATA=false` in `deploy/.env` before the first start to begin empty.
+- The deployment starts empty (`WSWE_SEED_DEMO_DATA=false`). If you set it to `true` for a demo, all demo users share the
+  known password `password123` and anyone who finds the URL can sign in, so tear that server down afterwards. Seeding
+  only runs against an empty database; to remove demo data later, recreate the database volume (`dc down -v`).
 - Sign-in rate limiting is not implemented yet.
 - Keep `deploy/.env` private (it is gitignored); it holds the database password.
