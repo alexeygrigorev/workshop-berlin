@@ -82,9 +82,9 @@ curl -X POST localhost:8000/v1/auth/sign-in -H 'content-type: application/json' 
 
 ### PostgreSQL
 
-The driver (`psycopg[binary]`, psycopg 3) is a regular dependency. From the repo root, `make db-up` starts a
-`postgres:16-alpine` container (`wswe-db`, user/password/db `wswe`, port 5432, volume `wswe_pgdata`; idempotent),
-`make db-psql` opens psql, `make db-down` stops it (data stays in the volume).
+The driver (`psycopg[binary]`, psycopg 3) is a regular dependency. From the repo root, `make up` runs
+`docker compose up -d --wait db` (`docker-compose.yml`: `postgres:16-alpine`, user/password/db `wswe`, port 5432,
+volume `wswe_pgdata`), `make psql` opens psql, `make down` stops the services (data stays in the volume).
 
 ```sh
 export WSWE_DATABASE_URL=postgresql+psycopg://wswe:wswe@localhost:5432/wswe   # postgresql:// or postgres:// also work
@@ -99,7 +99,7 @@ uv run uvicorn app.main:create_app --factory --port 8000      # or: make backend
 ### Testing on PostgreSQL
 
 ```sh
-make db-up
+make up
 WSWE_TEST_DATABASE_URL=postgresql+psycopg://wswe:wswe@localhost:5432/wswe uv run pytest
 ```
 
