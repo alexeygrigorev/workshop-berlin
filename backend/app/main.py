@@ -57,6 +57,7 @@ def create_app(settings: Settings | None = None, clock: Clock | None = None) -> 
         migrate.upgrade(app.state.db.engine)
     if settings.seed_demo_data:  # startup only, never from an endpoint; skipped unless the DB is empty
         with app.state.uow() as store:
+            migrate.lock_startup(store.db)  # two starting containers must not both seed
             if store.is_empty():
                 seed_data(store, app.state.passwords, clock.now())
 

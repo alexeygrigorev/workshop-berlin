@@ -234,3 +234,51 @@ def test_postgres_urls_are_normalised_to_psycopg():
         assert normalize_url(u) == "postgresql+psycopg://u:p%40@h:5432/d"
     assert normalize_url("sqlite:///x.db") == "sqlite:///x.db"
     assert make_engine("postgresql://u:p@localhost/d").dialect.driver == "psycopg"  # lazy: does not connect
+
+
+# ----------------------------------------------------------------------------- two containers during a rollout
+def test_concurrent_startups_migrate_and_seed_once(db_url, clock):
+    """Old and new app containers overlap during a zero-downtime rollout: both run migrations and the (idempotent)
+    seed at boot. A Postgres advisory lock serialises them; on SQLite the runs are simply sequential."""
+    import threading
+
+    errors: list[BaseException] = []
+    apps = []
+
+    def boot():
+        try:
+            apps.append(create_app(Settings(database_url=db_url, seed_demo_data=True, auto_migrate=True, **FAST),
+                                   clock))
+        except BaseException as e:  # pragma: no cover - only on failure
+            errors.append(e)
+
+    n = 1 if not ON_PG else 4
+    threads = [threading.Thread(target=boot) for _ in range(n)]
+    [t.start() for t in threads]
+    [t.join() for t in threads]
+    assert errors == []
+    with apps[0].state.uow() as store:
+        assert len(store.teams_of(store.user_by_email("anna@example.com").id)) == 2
+    for a in apps:
+        a.state.db.dispose()
+
+
+def test_scheduler_tick_is_idempotent(db_url, clock):
+    from sqlalchemy import func, select
+    from app.db.models import Poll
+
+    app = make_app(db_url, clock, seed_demo_data=True)
+
+    def polls() -> int:
+        with app.state.uow() as store:
+            return store.db.scalar(select(func.count()).select_from(Poll))
+
+    with app.state.uow() as store:
+        store.tick(clock.now())
+    first = polls()
+    assert first > 0
+    for _ in range(2):  # a second container's scheduler (or a retry) changes nothing
+        with app.state.uow() as store:
+            store.tick(clock.now())
+    assert polls() == first
+    app.state.db.dispose()
