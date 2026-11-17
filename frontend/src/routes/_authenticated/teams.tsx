@@ -2,7 +2,7 @@ import { createFileRoute, Link, useNavigate } from "@tanstack/react-router";
 import { useQuery, useQueryClient } from "@tanstack/react-query";
 import { useState } from "react";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
+import { auth, teams as teamsApi } from "@/lib/mock-backend";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
@@ -20,12 +20,7 @@ function TeamsPage() {
   const qc = useQueryClient();
   const teams = useQuery({
     queryKey: ["my-teams"],
-    queryFn: async () => {
-      const { data: u } = await supabase.auth.getUser();
-      const { data, error } = await supabase.from("team_members").select("role, teams(id, name, timezone)").eq("user_id", u.user!.id);
-      if (error) throw error;
-      return data;
-    },
+    queryFn: () => teamsApi.mine(),
   });
   const [name, setName] = useState("");
   const [tz, setTz] = useState(guessTimezone());
@@ -35,16 +30,19 @@ function TeamsPage() {
   async function create(e: React.FormEvent) {
     e.preventDefault();
     setBusy(true);
-    const { data, error } = await supabase.rpc("create_team", { _name: name, _timezone: tz, _office: office || undefined });
+    try {
+      const teamId = await teamsApi.create(name, tz, office || undefined);
+      qc.invalidateQueries({ queryKey: ["my-teams"] });
+      navigate({ to: "/t/$teamId/restaurants", params: { teamId }, search: { onboarding: true } });
+    } catch (e) {
+      toast.error(e instanceof Error ? e.message : "Could not create team");
+    }
     setBusy(false);
-    if (error) return toast.error(error.message);
-    qc.invalidateQueries({ queryKey: ["my-teams"] });
-    navigate({ to: "/t/$teamId/restaurants", params: { teamId: data as string }, search: { onboarding: true } });
   }
 
   async function signOut() {
     await qc.cancelQueries(); qc.clear();
-    await supabase.auth.signOut();
+    await auth.signOut();
     navigate({ to: "/auth", replace: true });
   }
 
@@ -55,11 +53,11 @@ function TeamsPage() {
       <div className="mt-6 space-y-3">
         {teams.isLoading && <div className="h-16 animate-pulse rounded-xl bg-muted" />}
         {teams.data?.length === 0 && <p className="text-muted-foreground">You're not in a team yet. Create one below, or open an invite link from a coworker.</p>}
-        {teams.data?.map((m) => m.teams && (
-          <Link key={m.teams.id} to="/t/$teamId" params={{ teamId: m.teams.id }}
+        {teams.data?.map((m) => (
+          <Link key={m.team.id} to="/t/$teamId" params={{ teamId: m.team.id }}
             className="flex items-center justify-between rounded-xl border bg-card p-4 shadow-card transition-transform hover:-translate-y-0.5">
-            <span className="font-display text-lg font-bold">{m.teams.name}</span>
-            <span className="text-sm text-muted-foreground">{m.role === "admin" ? "Admin · " : ""}{m.teams.timezone}</span>
+            <span className="font-display text-lg font-bold">{m.team.name}</span>
+            <span className="text-sm text-muted-foreground">{m.role === "admin" ? "Admin · " : ""}{m.team.timezone}</span>
           </Link>
         ))}
       </div>

@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { auth } from "@/lib/mock-backend";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/app/Logo";
 
@@ -20,7 +20,7 @@ export const Route = createFileRoute("/")({
 
 function Index() {
   const [signedIn, setSignedIn] = useState(false);
-  useEffect(() => { supabase.auth.getSession().then(({ data }) => setSignedIn(!!data.session)); }, []);
+  useEffect(() => { auth.getSession().then((session) => setSignedIn(!!session)); }, []);
   return (
     <main className="mx-auto flex min-h-screen max-w-5xl flex-col px-5 py-6">
       <header className="flex items-center justify-between">

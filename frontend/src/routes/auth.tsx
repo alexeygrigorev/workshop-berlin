@@ -1,13 +1,11 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
 import { toast } from "sonner";
-import { supabase } from "@/integrations/supabase/client";
-import { lovable } from "@/integrations/lovable";
+import { auth } from "@/lib/mock-backend";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { Logo } from "@/components/app/Logo";
-import { GoogleIcon } from "@/components/app/GoogleIcon";
 import { takeAfterAuth } from "@/lib/auth-redirect";
 
 export const Route = createFileRoute("/auth")({
@@ -27,36 +25,28 @@ function AuthPage() {
   const navigate = useNavigate();
   const [email, setEmail] = useState("");
   const [sending, setSending] = useState(false);
-  const [sent, setSent] = useState(false);
+  const [password, setPassword] = useState("");
+  const [signUp, setSignUp] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
-    const hash = new URLSearchParams(window.location.hash.slice(1));
-    const err = hash.get("error_description") || new URLSearchParams(window.location.search).get("error_description");
-    if (err) setError(err.replace(/\+/g, " "));
     const go = () => navigate({ to: takeAfterAuth() as "/teams", replace: true });
-    supabase.auth.getSession().then(({ data }) => data.session && go());
-    const { data } = supabase.auth.onAuthStateChange((_e, session) => session && go());
-    return () => data.subscription.unsubscribe();
+    auth.getSession().then((session) => session && go());
+    return auth.onChange((_e, session) => { if (session) go(); });
   }, [navigate]);
 
-  async function google() {
-    setError(null);
-    const r = await lovable.auth.signInWithOAuth("google", { redirect_uri: window.location.origin + "/auth" });
-    if (r.error) setError(r.error.message ?? "Google sign-in failed. Please try again.");
-  }
-
-  async function magic(e: React.FormEvent) {
+  async function submit(e: React.FormEvent) {
     e.preventDefault();
     setSending(true);
     setError(null);
-    const { error } = await supabase.auth.signInWithOtp({
-      email: email.trim(),
-      options: { emailRedirectTo: window.location.origin + "/auth" },
-    });
+    try {
+      await (signUp ? auth.signUp(email, password) : auth.signIn(email, password));
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Something went wrong";
+      setError(message);
+      toast.error(message);
+    }
     setSending(false);
-    if (error) { setError(error.message); toast.error(error.message); }
-    else setSent(true);
   }
 
   return (
@@ -68,27 +58,18 @@ function AuthPage() {
       </div>
       <div className="space-y-5 rounded-2xl border bg-card p-6 shadow-card">
         {error && <p role="alert" className="rounded-lg bg-destructive/10 p-3 text-sm text-destructive">{error}</p>}
-        <Button variant="google" size="xl" className="w-full rounded-full" onClick={google}>
-          <GoogleIcon /> Continue with Google
-        </Button>
-        <div className="flex items-center gap-3 text-xs uppercase tracking-wider text-muted-foreground">
-          <span className="h-px flex-1 bg-border" /> or <span className="h-px flex-1 bg-border" />
-        </div>
-        {sent ? (
-          <div role="status" className="rounded-lg bg-success/10 p-4 text-sm">
-            <p className="font-semibold">Check your inbox</p>
-            <p className="text-muted-foreground">We sent a sign-in link to {email}. Open it on this device.</p>
-            <Button variant="link" className="px-0" onClick={() => setSent(false)}>Use a different email</Button>
-          </div>
-        ) : (
-          <form onSubmit={magic} className="space-y-3">
-            <Label htmlFor="email">Work email</Label>
-            <Input id="email" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" className="h-11" />
-            <Button type="submit" variant="pop" size="xl" className="w-full" disabled={sending}>
-              {sending ? "Sending…" : "Email me a sign-in link"}
-            </Button>
-          </form>
-        )}
+        <form onSubmit={submit} className="space-y-3">
+          <Label htmlFor="email">Work email</Label>
+          <Input id="email" type="email" required value={email} onChange={(e) => setEmail(e.target.value)} placeholder="you@company.com" className="h-11" />
+          <Label htmlFor="password">Password</Label>
+          <Input id="password" type="password" required minLength={6} autoComplete={signUp ? "new-password" : "current-password"} value={password} onChange={(e) => setPassword(e.target.value)} className="h-11" />
+          <Button type="submit" variant="pop" size="xl" className="w-full" disabled={sending}>
+            {sending ? "Please wait…" : signUp ? "Create account" : "Sign in"}
+          </Button>
+          <Button type="button" variant="link" className="px-0" onClick={() => setSignUp(!signUp)}>
+            {signUp ? "Already have an account? Sign in" : "No account? Create one"}
+          </Button>
+        </form>
       </div>
     </main>
   );

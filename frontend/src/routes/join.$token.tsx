@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { supabase } from "@/integrations/supabase/client";
+import { teams, auth } from "@/lib/mock-backend";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/app/Logo";
 import { setAfterAuth } from "@/lib/auth-redirect";
@@ -27,19 +27,20 @@ function JoinPage() {
 
   useEffect(() => {
     (async () => {
-      const { data: s } = await supabase.auth.getSession();
-      if (!s.session) { setAfterAuth(`/join/${token}`); navigate({ to: "/auth", replace: true }); return; }
-      const { data } = await supabase.rpc("invite_info", { _token: token });
-      setInfo(data?.[0] ?? null);
+      if (!(await auth.getSession())) { setAfterAuth(`/join/${token}`); navigate({ to: "/auth", replace: true }); return; }
+      setInfo(await teams.inviteInfo(token));
     })();
   }, [token, navigate]);
 
   async function join() {
     setBusy(true);
-    const { data, error } = await supabase.rpc("join_team", { _token: token });
+    try {
+      const teamId = await teams.join(token);
+      navigate({ to: "/t/$teamId", params: { teamId } });
+    } catch (e) {
+      setErr(e instanceof Error ? e.message : "Could not join");
+    }
     setBusy(false);
-    if (error) return setErr(error.message);
-    navigate({ to: "/t/$teamId", params: { teamId: data as string } });
   }
 
   return (
