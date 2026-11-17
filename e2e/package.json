@@ -1,0 +1,14 @@
+{
+  "name": "wswe-e2e",
+  "private": true,
+  "version": "1.0.0",
+  "scripts": {
+    "test": "playwright test",
+    "test:headed": "playwright test --headed",
+    "test:debug": "playwright test --debug"
+  },
+  "devDependencies": {
+    "@playwright/test": "1.65.1",
+    "@types/node": "22.20.5"
+  }
+}
