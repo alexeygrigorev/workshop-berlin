@@ -62,3 +62,21 @@ make up             # docker compose up: app + Postgres -> http://localhost:8000
   (on Linux add `--add-host=host.docker.internal:host-gateway`).
 - Static frontend build without Docker: `cd frontend && npm run build:static` -> `frontend/dist/client`
   (`npm run build` still produces the SSR/Nitro build).
+
+## End-to-end tests
+
+A Playwright test (`e2e/`, Chromium) signs in as Anna, adds a restaurant to "Design crew", reloads and checks it
+persisted (backend + Postgres).
+
+```sh
+make e2e    # npm ci, installs chromium, runs the tests
+```
+
+- Needs Docker running. The run starts its own throw-away compose project `wswe-e2e` (app on :18000, Postgres on
+  :15432, volume `wswe_e2e_pgdata`) and removes it, volume included, afterwards (also when tests fail). Your dev stack
+  (`make up`, :8000, `wswe_pgdata`) is not touched and may keep running.
+- Headed / debug: `cd e2e && npx playwright test --headed` or `npx playwright test --debug`. Report:
+  `npx playwright show-report`.
+- Reuse an already running stack (no docker start/stop), e.g. for quick debugging:
+  `cd e2e && E2E_BASE_URL=http://localhost:8000 npx playwright test`. The test adds a uniquely named restaurant to
+  that stack's "Design crew" team (it is not removed).

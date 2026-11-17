@@ -1,4 +1,4 @@
-.PHONY: frontend backend backend-test frontend-test help up db down psql backend-pg
+.PHONY: frontend backend backend-test frontend-test help up db down psql backend-pg e2e
 
 help:
 	@echo "make frontend       run the frontend dev server (vite)"
@@ -10,6 +10,7 @@ help:
 	@echo "make down           stop compose services (data volume kept)"
 	@echo "make psql           psql shell in the db service"
 	@echo "make backend-pg     run the backend on :8000 against the Postgres container"
+	@echo "make e2e           Playwright end-to-end test against a throw-away docker compose stack"
 	@echo "Tip: WSWE_FIXED_NOW=2026-11-18T09:00:00Z make backend  (freeze the clock so today's poll is open)"
 
 frontend:
@@ -48,3 +49,9 @@ psql:
 
 backend-pg:
 	cd backend && uv sync && WSWE_DATABASE_URL=$(PG_URL) uv run alembic upgrade head && WSWE_DATABASE_URL=$(PG_URL) uv run uvicorn app.main:create_app --factory --reload --port 8000
+
+
+# ---- End-to-end tests (Playwright; own compose project wswe-e2e on :18000/:15432, throw-away volume) ----
+.PHONY: e2e
+e2e:
+	cd e2e && npm ci && npx playwright install chromium && npx playwright test
