@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { moveChoice, tally, toggleChoice } from "./scoring";
+import { moveChoice, placeChoice, tally, toggleChoice } from "./scoring";
 
 const c = [
   { id: "a", name: "Alpha" },
@@ -39,5 +39,12 @@ describe("tap to rank", () => {
   it("moves picks up and down", () => {
     expect(moveChoice(["a", "b", "c"], 2, -1)).toEqual(["a", "c", "b"]);
     expect(moveChoice(["a", "b"], 0, -1)).toEqual(["a", "b"]);
+  });
+  it("places a pick at an explicit rank, shifting others down", () => {
+    expect(placeChoice(["a", "b"], "c", 0)).toEqual({ next: ["c", "a", "b"], dropped: null });
+    expect(placeChoice(["a", "b", "c"], "d", 1)).toEqual({ next: ["a", "d", "b"], dropped: "c" });
+    expect(placeChoice(["a", "b", "c"], "c", 0)).toEqual({ next: ["c", "a", "b"], dropped: null });
+    expect(placeChoice(["a"], "b", 2)).toEqual({ next: ["a", "b"], dropped: null });
+    expect(placeChoice(["a", "b"], "b", 1)).toEqual({ next: ["a"], dropped: null });
   });
 });

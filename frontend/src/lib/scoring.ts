@@ -50,6 +50,17 @@ export function moveChoice(selected: string[], index: number, dir: -1 | 1): stri
   return next;
 }
 
+/**
+ * Put `id` at rank `index` (0-based), shifting later picks down; a pick pushed past `max` drops off.
+ * Choosing the rank it already holds removes it. Ranks stay gap-free: an index past the end appends.
+ */
+export function placeChoice(selected: string[], id: string, index: number, max = 3): { next: string[]; dropped: string | null } {
+  if (selected[index] === id) return { next: selected.filter((x) => x !== id), dropped: null };
+  const rest = selected.filter((x) => x !== id);
+  const next = [...rest.slice(0, index), id, ...rest.slice(index)];
+  return { next: next.slice(0, max), dropped: next.length > max ? next[max] : null };
+}
+
 export const TIE_BREAK_LABEL: Record<string, string> = {
   first_place_votes: "Tie on points — decided by most 1st-place votes.",
   second_place_votes: "Tie on points and 1st-place votes — decided by most 2nd-place votes.",
