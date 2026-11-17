@@ -1,0 +1,2866 @@
+openapi: 3.1.0
+info:
+  title: Where Should We Eat? API
+  version: 1.0.0
+  summary: Daily team lunch voting - teams, restaurants, ranked top-3 ballots, live standings and history.
+  description: |
+    HTTP API for the "Where Should We Eat?" lunch-voting app. It is the single source of truth for the
+    web frontend, a CLI, and AI agents: every action available in the UI is available here, and nothing
+    the UI does is UI-only.
+
+    ## Concepts
+    - A **team** has members (roles `admin` / `member`), a shared **restaurant** list, an IANA timezone
+      and a daily schedule (default 08:00-11:30 team-local, Monday-Friday).
+    - Every poll day the team gets exactly one **poll**. Its lifecycle is `scheduled` -> `open` -> `closed`,
+      driven only by server time against `opens_at` / `closes_at` (UTC instants computed from the team's
+      local schedule; DST-safe). Clients never decide status.
+    - When a poll is created, all active restaurants are snapshotted as **candidates**. Restaurants added
+      while the poll is open are added to its candidates; archiving a restaurant never removes it from an
+      already-created poll.
+    - A **ballot** ranks 1-3 distinct candidates. Points: 1st = 3, 2nd = 2, 3rd = 1 (positional/Borda-style,
+      *not* instant-runoff). Ballots are visible, with voter names, to all team members.
+    - At `closes_at` the poll is **finalized**: highest score wins; ties are broken by most 1st-place votes,
+      then most 2nd-place votes, then a seeded deterministic random draw (the seed is never exposed).
+      Zero ballots -> `no_winner: true`. Finalization is idempotent.
+
+    ## Conventions
+    - All paths are prefixed with `/v1`. Team-scoped resources live under `/v1/teams/{teamId}`.
+    - IDs are UUIDs. Timestamps are RFC 3339 / ISO-8601 UTC instants (`2026-11-17T10:30:00Z`).
+      `poll_date` is a calendar date (`YYYY-MM-DD`) in the team's timezone; polls also carry `timezone`.
+      Local schedule times (`open_time`, `close_time`) are `HH:MM` in team-local time.
+    - JSON field names are `snake_case`. Optional fields are present with `null` rather than omitted.
+    - Lists are returned as `{ "items": [...] }`. Lists that grow without bound (polls/history) are
+      cursor-paginated: pass `limit` and the opaque `cursor` from the previous response's `next_cursor`.
+    - Errors are always `application/problem+json` (RFC 9457) with a stable machine-readable `code`.
+      Branch on `code`, never on `title`/`detail` text. See the `Problem` schema for the full list.
+    - Retries: `PUT` and `DELETE` are idempotent. `POST` create operations accept an optional
+      `Idempotency-Key` header (any unique string, kept 24h) so a retried request returns the original
+      result instead of creating a duplicate. Joining via invite and finalizing a poll are idempotent by design.
+    - Optimistic concurrency: `GET` on teams and restaurants returns an `ETag`; send it as `If-Match` on
+      `PATCH` to avoid lost updates (`412 precondition_failed` on mismatch). `If-Match` is optional.
+
+    ## Authentication
+    Two credential types, both sent as `Authorization: Bearer <token>`:
+    - **Session tokens** from `signUp` / `signIn` (email + password, as the current app does). Browsers
+      may instead rely on the `HttpOnly` session cookie set by the same calls (`cookieAuth`); cookie-
+      authenticated unsafe requests must send an `Origin` header matching the app (CSRF protection).
+    - **Personal API tokens** (`wswe_pat_...`) for CLIs and AI agents, created via `createApiToken`. They act
+      as the user who created them, with the same team permissions, and can be revoked at any time.
+
+    Magic-link email and Google OAuth sign-in (specs.md section 2) are planned; they will be additional ways to
+    obtain the same session token and will not change any other operation.
+
+    ## Authorization
+    Each operation states who may call it:
+    - **Public** - no credentials.
+    - **Authenticated** - any signed-in user.
+    - **Member** - a member of `{teamId}`. Non-members get `403 not_a_member` (same for unknown teams
+      the caller has no access to, so team existence is not leaked beyond that).
+    - **Admin** - an admin of `{teamId}`; members get `403 admins_only`.
+
+    ## Live updates
+    `GET /v1/teams/{teamId}/events` is a Server-Sent Events stream of change notifications for one
+    team (see `streamTeamEvents`). Events are hints: on any event, or after reconnecting, re-fetch the
+    affected resource for canonical state.
+  contact:
+    name: Where Should We Eat? maintainers
+servers:
+  - url: http://localhost:8787
+    description: Local development server
+tags:
+  - name: Meta
+    description: Service health and server time.
+  - name: Auth
+    description: Sign-up, sign-in and sign-out with email + password. Returns a session token.
+  - name: Me
+    description: The signed-in user and their teams.
+  - name: API tokens
+    description: Long-lived personal API tokens for CLIs and AI agents.
+  - name: Teams
+    description: Teams, team settings and schedule.
+  - name: Members
+    description: Team membership, roles, removing members and leaving a team.
+  - name: Invites
+    description: Shareable invite links (token based) to join a team.
+  - name: Restaurants
+    description: The team's persistent restaurant list. Soft-delete only (archive / unarchive).
+  - name: Polls
+    description: Daily polls, live standings, finalization and history.
+  - name: Ballots
+    description: Ranked top-3 ballots. One current ballot per member per poll; re-submitting replaces it.
+  - name: Stats
+    description: Aggregates computed from finalized history.
+  - name: Events
+    description: Realtime change notifications (Server-Sent Events).
+
+security:
+  - bearerAuth: []
+  - cookieAuth: []
+
+paths:
+  /v1/health:
+    get:
+      tags: [Meta]
+      operationId: getHealth
+      summary: Health check and server time
+      description: |
+        **Public.** Returns service status and the authoritative server clock. Clients showing a countdown
+        to `closes_at` can use `server_time` to correct for local clock skew.
+      security: []
+      responses:
+        '200':
+          description: Service is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Health'
+              example:
+                status: ok
+                version: 1.0.0
+                server_time: '2026-11-17T09:14:03Z'
+        '503':
+          description: Service (or its database) is unavailable.
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://docs.wswe.dev/problems/unavailable
+                title: Service unavailable
+                status: 503
+                code: unavailable
+                detail: Database is not reachable.
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/auth/sign-up:
+    post:
+      tags: [Auth]
+      operationId: signUp
+      summary: Create an account and start a session
+      description: |
+        **Public.** Creates a user with email + password and signs them in. The email is trimmed and
+        lower-cased. Password must be at least 6 characters. Also sets the `wswe_session` cookie for browsers.
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+            example:
+              email: anna@company.com
+              password: correct-horse
+      responses:
+        '201':
+          description: Account created; session started.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/SessionCookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+              examples:
+                session:
+                  $ref: '#/components/examples/SessionExample'
+        '409':
+          description: '`email_taken` - an account with this email already exists.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://docs.wswe.dev/problems/email-taken
+                title: Email already registered
+                status: 409
+                code: email_taken
+                detail: An account with anna@company.com already exists. Sign in instead.
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/auth/sign-in:
+    post:
+      tags: [Auth]
+      operationId: signIn
+      summary: Sign in with email and password
+      description: |
+        **Public.** Exchanges email + password for a session token (also set as the `wswe_session` cookie).
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/Credentials'
+            example:
+              email: anna@company.com
+              password: correct-horse
+      responses:
+        '200':
+          description: Signed in.
+          headers:
+            Set-Cookie:
+              $ref: '#/components/headers/SessionCookie'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Session'
+              examples:
+                session:
+                  $ref: '#/components/examples/SessionExample'
+        '401':
+          description: '`invalid_credentials` - unknown email or wrong password (deliberately indistinguishable).'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://docs.wswe.dev/problems/invalid-credentials
+                title: Invalid login credentials
+                status: 401
+                code: invalid_credentials
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+        '429':
+          $ref: '#/components/responses/RateLimited'
+
+  /v1/auth/sign-out:
+    post:
+      tags: [Auth]
+      operationId: signOut
+      summary: End the current session
+      description: |
+        **Authenticated (session).** Revokes the session token used for this request and clears the cookie.
+        Idempotent. Calling it with a personal API token returns `204` without revoking the token
+        (use `revokeApiToken` for that).
+      responses:
+        '204':
+          description: Signed out.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /v1/me:
+    get:
+      tags: [Me]
+      operationId: getCurrentUser
+      summary: Get the signed-in user
+      description: |
+        **Authenticated.** Returns the user behind the credentials. Use this to check whether a stored
+        token/cookie is still valid (`401 unauthenticated` if not).
+      responses:
+        '200':
+          description: Current user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              examples:
+                user:
+                  $ref: '#/components/examples/UserExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+    patch:
+      tags: [Me]
+      operationId: updateCurrentUser
+      summary: Update my profile (display name)
+      description: |
+        **Authenticated.** Sets the display name shown to teammates next to ballots and in member lists.
+        Defaults to the local part of the email.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/UserUpdate'
+            example:
+              display_name: Anna K.
+      responses:
+        '200':
+          description: Updated user.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/User'
+              example:
+                id: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+                email: anna@company.com
+                display_name: Anna K.
+                created_at: '2026-11-02T08:01:12Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /v1/me/teams:
+    get:
+      tags: [Me]
+      operationId: listMyTeams
+      summary: List teams I belong to
+      description: '**Authenticated.** All teams the caller is a member of, with the caller''s role in each.'
+      responses:
+        '200':
+          description: My memberships.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/MyTeam'
+              example:
+                items:
+                  - role: admin
+                    joined_at: '2026-11-02T08:05:00Z'
+                    team:
+                      id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+                      name: Design crew
+                      timezone: Europe/Berlin
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+
+  /v1/me/api-tokens:
+    get:
+      tags: [API tokens]
+      operationId: listApiTokens
+      summary: List my personal API tokens
+      description: '**Authenticated.** Lists the caller''s tokens. Secret values are never returned again after creation.'
+      responses:
+        '200':
+          description: Tokens (without secrets).
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/ApiToken'
+              example:
+                items:
+                  - id: 0c6a3e1f-5b7d-4c2a-8e9f-1a2b3c4d5e6f
+                    name: lunch-cli on laptop
+                    token_prefix: wswe_pat_3kF9
+                    created_at: '2026-11-17T09:20:00Z'
+                    expires_at: '2027-11-17T00:00:00Z'
+                    last_used_at: '2026-11-17T09:31:44Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+    post:
+      tags: [API tokens]
+      operationId: createApiToken
+      summary: Create a personal API token
+      description: |
+        **Authenticated.** Creates a long-lived bearer token for a CLI or AI agent. The secret `token` is
+        returned **only in this response** - store it securely. The token acts as the caller with the
+        caller's team roles.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/ApiTokenCreate'
+            example:
+              name: lunch-cli on laptop
+              expires_at: '2027-11-17T00:00:00Z'
+      responses:
+        '201':
+          description: Token created. `token` is shown once.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/ApiTokenWithSecret'
+              example:
+                id: 0c6a3e1f-5b7d-4c2a-8e9f-1a2b3c4d5e6f
+                name: lunch-cli on laptop
+                token_prefix: wswe_pat_3kF9
+                created_at: '2026-11-17T09:20:00Z'
+                expires_at: '2027-11-17T00:00:00Z'
+                last_used_at: null
+                token: wswe_pat_3kF9q2LwXbR7mZt0aVhY8cNdE1sUoPj4
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /v1/me/api-tokens/{tokenId}:
+    parameters:
+      - $ref: '#/components/parameters/TokenId'
+    delete:
+      tags: [API tokens]
+      operationId: revokeApiToken
+      summary: Revoke a personal API token
+      description: '**Authenticated (token owner).** Revokes immediately. Idempotent: revoking an already-revoked token returns `204`.'
+      responses:
+        '204':
+          description: Revoked.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/invites/{inviteToken}:
+    parameters:
+      - $ref: '#/components/parameters/InviteToken'
+    get:
+      tags: [Invites]
+      operationId: getInviteInfo
+      summary: Preview an invite link
+      description: |
+        **Authenticated** (any signed-in user; invitees sign in first). Shows which team an invite token
+        belongs to and whether the caller is already a member. `404 invite_invalid` if the token is unknown,
+        revoked or regenerated.
+      responses:
+        '200':
+          description: Invite preview.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/InvitePreview'
+              example:
+                team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+                team_name: Design crew
+                member_count: 6
+                already_member: false
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/InviteInvalid'
+
+  /v1/invites/{inviteToken}/accept:
+    parameters:
+      - $ref: '#/components/parameters/InviteToken'
+    post:
+      tags: [Invites]
+      operationId: joinTeam
+      summary: Join a team via invite link
+      description: |
+        **Authenticated.** Adds the caller to the team as `member`. **Idempotent**: if the caller is already a
+        member, returns `200` with the existing membership (role unchanged) and `joined: false`.
+      responses:
+        '200':
+          description: Already a member; nothing changed.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JoinResult'
+              example:
+                joined: false
+                role: admin
+                team:
+                  id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+                  name: Design crew
+                  timezone: Europe/Berlin
+        '201':
+          description: Joined the team.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/JoinResult'
+              example:
+                joined: true
+                role: member
+                team:
+                  id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+                  name: Design crew
+                  timezone: Europe/Berlin
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '404':
+          $ref: '#/components/responses/InviteInvalid'
+
+  /v1/teams:
+    post:
+      tags: [Teams]
+      operationId: createTeam
+      summary: Create a team
+      description: |
+        **Authenticated.** Creates a team with the caller as its first `admin` and generates an invite link.
+        Schedule defaults to 08:00-11:30, Monday-Friday, team-local. If `seed_restaurants` is true (default,
+        matching the current app) the team starts with a starter restaurant list.
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TeamCreate'
+            example:
+              name: Design crew
+              timezone: Europe/Berlin
+              office: Berlin Mitte
+      responses:
+        '201':
+          description: Team created.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+              examples:
+                team:
+                  $ref: '#/components/examples/TeamExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /v1/teams/{teamId}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      tags: [Teams]
+      operationId: getTeam
+      summary: Get a team and its settings
+      description: '**Member.** Team details, schedule and the caller''s role.'
+      responses:
+        '200':
+          description: The team.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+              examples:
+                team:
+                  $ref: '#/components/examples/TeamExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    patch:
+      tags: [Teams]
+      operationId: updateTeam
+      summary: Update team settings (name, timezone, office, schedule)
+      description: |
+        **Admin.** Partial update; only provided fields change. Timezone and schedule changes
+        (`timezone`, `open_time`, `close_time`) apply only to polls that have **not opened yet**; an open or
+        closed poll keeps its `opens_at` / `closes_at`. `open_time` must be earlier than `close_time`.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/TeamUpdate'
+            example:
+              name: Design crew (Mitte)
+              close_time: '11:45'
+      responses:
+        '200':
+          description: Updated team.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Team'
+              examples:
+                team:
+                  $ref: '#/components/examples/TeamExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /v1/teams/{teamId}/members:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      tags: [Members]
+      operationId: listMembers
+      summary: List team members
+      description: '**Member.** All members ordered by `joined_at` ascending.'
+      responses:
+        '200':
+          description: Members.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Member'
+              example:
+                items:
+                  - user_id: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+                    display_name: anna
+                    role: admin
+                    joined_at: '2026-11-02T08:05:00Z'
+                  - user_id: 9e4d2c1b-3a5f-4e6d-8c7b-6a5f4e3d2c1b
+                    display_name: ben
+                    role: member
+                    joined_at: '2026-11-03T07:58:41Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/teams/{teamId}/members/me:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    delete:
+      tags: [Members]
+      operationId: leaveTeam
+      summary: Leave a team
+      description: |
+        **Member.** Removes the caller from the team. Ballots already cast stay in history (and in an open
+        poll they remain counted - withdraw first with `deleteMyBallot` if desired).
+        The last remaining admin cannot leave while other members exist (`409 last_admin`); promote someone
+        first. If the caller is the only member, leaving is allowed and the team becomes inaccessible.
+      responses:
+        '204':
+          description: Left the team.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          $ref: '#/components/responses/LastAdmin'
+
+  /v1/teams/{teamId}/members/{userId}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/UserId'
+    patch:
+      tags: [Members]
+      operationId: updateMemberRole
+      summary: Change a member's role
+      description: |
+        **Admin.** Promote to `admin` or demote to `member`. Demoting the last admin fails with
+        `409 last_admin`. Setting the current role is a no-op (`200`).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/MemberUpdate'
+            example:
+              role: admin
+      responses:
+        '200':
+          description: Updated membership.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Member'
+              example:
+                user_id: 9e4d2c1b-3a5f-4e6d-8c7b-6a5f4e3d2c1b
+                display_name: ben
+                role: admin
+                joined_at: '2026-11-03T07:58:41Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/LastAdmin'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+    delete:
+      tags: [Members]
+      operationId: removeMember
+      summary: Remove a member from the team
+      description: |
+        **Admin.** Removes another member. Their past ballots remain in history. To remove yourself use
+        `leaveTeam`. Removing the last admin fails with `409 last_admin`.
+      responses:
+        '204':
+          description: Member removed.
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/LastAdmin'
+
+  /v1/teams/{teamId}/invite:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      tags: [Invites]
+      operationId: getTeamInvite
+      summary: Get the team's current invite link
+      description: |
+        **Member.** Returns the active invite token and a ready-to-share URL, or `active: false` after an
+        admin revoked it.
+      responses:
+        '200':
+          description: Current invite.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invite'
+              examples:
+                invite:
+                  $ref: '#/components/examples/InviteExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    delete:
+      tags: [Invites]
+      operationId: revokeTeamInvite
+      summary: Revoke the invite link
+      description: |
+        **Admin.** Disables the current invite token; nobody can join until an admin calls
+        `regenerateTeamInvite`. Existing members are unaffected. Idempotent.
+      responses:
+        '200':
+          description: Invite revoked.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invite'
+              example:
+                active: false
+                token: null
+                url: null
+                updated_at: '2026-11-17T09:30:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/teams/{teamId}/invite/regenerate:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    post:
+      tags: [Invites]
+      operationId: regenerateTeamInvite
+      summary: Generate a new invite link
+      description: |
+        **Admin.** Creates a new random invite token, invalidating the previous one (also re-enables a
+        revoked invite). Not idempotent: each call yields a new token.
+      responses:
+        '200':
+          description: New invite.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Invite'
+              examples:
+                invite:
+                  $ref: '#/components/examples/InviteExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/teams/{teamId}/restaurants:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      tags: [Restaurants]
+      operationId: listRestaurants
+      summary: List the team's restaurants
+      description: |
+        **Member.** Sorted by name (case-insensitive). By default only active restaurants are returned; use
+        `status=all` or `status=archived` for admin/history views. Optional `q` does a case-insensitive
+        substring search over name, cuisine and address. Not paginated: teams are expected to have at
+        most a few hundred restaurants.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Which restaurants to include.
+          schema:
+            type: string
+            enum: [active, archived, all]
+            default: active
+        - name: q
+          in: query
+          required: false
+          description: Case-insensitive search over name, cuisine and address.
+          schema:
+            type: string
+            maxLength: 120
+          example: thai
+      responses:
+        '200':
+          description: Restaurants.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Restaurant'
+              example:
+                items:
+                  - id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+                    team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+                    name: Pho Saigon
+                    cuisine: Vietnamese
+                    address: Reinhardtstraße 12, 10117 Berlin
+                    website_url: null
+                    map_url: https://www.google.com/maps/search/?api=1&query=Pho+Saigon+Reinhardtstra%C3%9Fe+12
+                    notes: Fast at 12:00, slow after 12:30
+                    archived_at: null
+                    created_by: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+                    created_at: '2026-11-02T08:10:00Z'
+                    updated_at: '2026-11-02T08:10:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+    post:
+      tags: [Restaurants]
+      operationId: createRestaurant
+      summary: Add a restaurant
+      description: |
+        **Member.** Adds a restaurant to the team list. If today's poll is currently `open`, the restaurant is
+        added to its candidates in the same transaction (existing ballots are unchanged). If the poll is
+        `scheduled` it is also included; if it is `closed`, it appears from the next poll.
+
+        Duplicate protection: rejected with `409 duplicate_restaurant` if an **active** restaurant has the same
+        normalized name (trimmed, case- and whitespace-insensitive) and, when both have one, the same normalized
+        address. The problem body includes `existing_restaurant_id`. If the duplicate is archived, unarchive it
+        instead (`unarchiveRestaurant`).
+      parameters:
+        - $ref: '#/components/parameters/IdempotencyKey'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestaurantCreate'
+            example:
+              name: Pho Saigon
+              cuisine: Vietnamese
+              address: Reinhardtstraße 12, 10117 Berlin
+              website_url: null
+              map_url: https://www.google.com/maps/search/?api=1&query=Pho+Saigon+Reinhardtstra%C3%9Fe+12
+              notes: Fast at 12:00, slow after 12:30
+      responses:
+        '201':
+          description: Restaurant created.
+          headers:
+            Location:
+              $ref: '#/components/headers/Location'
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Restaurant'
+              examples:
+                restaurant:
+                  $ref: '#/components/examples/RestaurantExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '409':
+          description: '`duplicate_restaurant` - an active restaurant with the same name (and address) exists.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://docs.wswe.dev/problems/duplicate-restaurant
+                title: Restaurant already exists
+                status: 409
+                code: duplicate_restaurant
+                detail: '"Pho Saigon" at Reinhardtstraße 12 is already on the list.'
+                existing_restaurant_id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /v1/teams/{teamId}/restaurants/{restaurantId}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/RestaurantId'
+    get:
+      tags: [Restaurants]
+      operationId: getRestaurant
+      summary: Get a restaurant
+      description: '**Member.** Works for archived restaurants too (needed for history).'
+      responses:
+        '200':
+          description: The restaurant.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Restaurant'
+              examples:
+                restaurant:
+                  $ref: '#/components/examples/RestaurantExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    patch:
+      tags: [Restaurants]
+      operationId: updateRestaurant
+      summary: Edit a restaurant
+      description: |
+        **Admin, or the member who created the restaurant.** Partial update; send `null` to clear an optional
+        field. Renaming does not change the candidate name snapshot of polls that are already closed.
+        Same duplicate rule as `createRestaurant`.
+      parameters:
+        - $ref: '#/components/parameters/IfMatch'
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/RestaurantUpdate'
+            example:
+              notes: Closed on Mondays
+      responses:
+        '200':
+          description: Updated restaurant.
+          headers:
+            ETag:
+              $ref: '#/components/headers/ETag'
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Restaurant'
+              examples:
+                restaurant:
+                  $ref: '#/components/examples/RestaurantExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+        '412':
+          $ref: '#/components/responses/PreconditionFailed'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /v1/teams/{teamId}/restaurants/{restaurantId}/archive:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/RestaurantId'
+    post:
+      tags: [Restaurants]
+      operationId: archiveRestaurant
+      summary: Archive a restaurant (soft delete)
+      description: |
+        **Admin, or the member who created the restaurant.** Excludes it from **future** polls. It stays a
+        candidate in a poll that is already open (existing ballots stay valid) and remains readable in
+        history. Idempotent: archiving an archived restaurant returns it unchanged.
+      responses:
+        '200':
+          description: Archived restaurant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Restaurant'
+              example:
+                id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+                team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+                name: Pho Saigon
+                cuisine: Vietnamese
+                address: Reinhardtstraße 12, 10117 Berlin
+                website_url: null
+                map_url: null
+                notes: null
+                archived_at: '2026-11-17T09:40:00Z'
+                created_by: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+                created_at: '2026-11-02T08:10:00Z'
+                updated_at: '2026-11-17T09:40:00Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/teams/{teamId}/restaurants/{restaurantId}/unarchive:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/RestaurantId'
+    post:
+      tags: [Restaurants]
+      operationId: unarchiveRestaurant
+      summary: Restore an archived restaurant
+      description: |
+        **Admin, or the member who created the restaurant.** Makes it active again. Like a newly added
+        restaurant, it joins today's poll candidates if that poll is not closed. Fails with
+        `409 duplicate_restaurant` if an active duplicate now exists. Idempotent.
+      responses:
+        '200':
+          description: Active restaurant.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Restaurant'
+              examples:
+                restaurant:
+                  $ref: '#/components/examples/RestaurantExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/Conflict'
+
+  /v1/teams/{teamId}/polls:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      tags: [Polls]
+      operationId: listPolls
+      summary: List polls (history)
+      description: |
+        **Member.** Reverse-chronological by `poll_date`. Defaults to `status=closed`, i.e. the history view.
+        Items are `Poll` summaries (winner, ballot count, final scores, tie-break); fetch `getPoll` for named
+        ballots. Cursor-paginated.
+      parameters:
+        - name: status
+          in: query
+          required: false
+          description: Filter by status. `any` includes scheduled and open polls.
+          schema:
+            type: string
+            enum: [closed, open, scheduled, any]
+            default: closed
+        - name: from
+          in: query
+          required: false
+          description: Earliest `poll_date` (inclusive).
+          schema:
+            type: string
+            format: date
+          example: '2026-11-01'
+        - name: to
+          in: query
+          required: false
+          description: Latest `poll_date` (inclusive).
+          schema:
+            type: string
+            format: date
+          example: '2026-11-30'
+        - $ref: '#/components/parameters/Limit'
+        - $ref: '#/components/parameters/Cursor'
+      responses:
+        '200':
+          description: A page of polls.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PollPage'
+              example:
+                items:
+                  - id: 2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e
+                    team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+                    poll_date: '2026-11-16'
+                    timezone: Europe/Berlin
+                    opens_at: '2026-11-16T07:00:00Z'
+                    closes_at: '2026-11-16T10:30:00Z'
+                    status: closed
+                    candidates:
+                      - id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+                        name: Pho Saigon
+                        archived: false
+                    winner_id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+                    winner: null
+                    no_winner: false
+                    ballot_count: 1
+                    final_scores:
+                      - restaurant_id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+                        name: Pho Saigon
+                        score: 3
+                        first_count: 1
+                        second_count: 0
+                        third_count: 0
+                        position: 1
+                    tie_break: null
+                    finalized_at: '2026-11-16T10:30:02Z'
+                next_cursor: eyJkIjoiMjAyNi0xMS0xMyJ9
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /v1/teams/{teamId}/polls/current:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      tags: [Polls]
+      operationId: getCurrentPoll
+      summary: Get today's poll (or the next scheduled one), with candidates, ballots and live standings
+      description: |
+        **Member.** The primary dashboard call. Returns the poll for today's team-local date if today is a poll
+        day; otherwise (weekend, or the team's poll days are over) the next scheduled poll. The poll is
+        created on first access if the scheduler has not created it yet, so this always returns a poll.
+
+        Includes `candidates`, named `ballots`, live (or final) `standings`, and the caller's `my_ballot`.
+        The response status reflects server time at the moment of the request; if `closes_at` has passed
+        the poll is finalized before responding.
+      responses:
+        '200':
+          description: Current poll with details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PollDetail'
+              examples:
+                openPollDetail:
+                  $ref: '#/components/examples/OpenPollDetailExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+  /v1/teams/{teamId}/polls-by-date/{pollDate}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/PollDate'
+    get:
+      tags: [Polls]
+      operationId: getPollByDate
+      summary: Get the poll for a team-local date
+      description: |
+        **Member.** Same payload as `getPoll`. `404 not_found` if no poll exists for that date (weekends,
+        dates before the team existed, or dates further ahead than the scheduler has created).
+      responses:
+        '200':
+          description: Poll with details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PollDetail'
+              examples:
+                closedPollDetail:
+                  $ref: '#/components/examples/ClosedPollDetailExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/teams/{teamId}/polls/{pollId}:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/PollId'
+    get:
+      tags: [Polls]
+      operationId: getPoll
+      summary: Get a poll with candidates, ballots and standings
+      description: |
+        **Member.** For closed polls this is the immutable final snapshot: final standings, tie-break reason
+        and named ballots as they were at close (history drill-down).
+      responses:
+        '200':
+          description: Poll with details.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/PollDetail'
+              examples:
+                closedPollDetail:
+                  $ref: '#/components/examples/ClosedPollDetailExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/teams/{teamId}/polls/{pollId}/standings:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/PollId'
+    get:
+      tags: [Polls]
+      operationId: getPollStandings
+      summary: Get computed standings for a poll
+      description: |
+        **Member.** Server-computed scores (3/2/1) with first/second/third counts for every candidate,
+        including zero-vote candidates. While open these are **live** standings sorted for display (score,
+        1st-place votes, 2nd-place votes, then name) and `leader` is *not* a winner. When closed they are
+        the final scores, and `winner_id` / `tie_break` are set.
+      responses:
+        '200':
+          description: Standings.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Standings'
+              example:
+                poll_id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                status: open
+                final: false
+                ballot_count: 2
+                member_count: 6
+                leader_ids: [3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9]
+                winner_id: null
+                no_winner: false
+                tie_break: null
+                items:
+                  - restaurant_id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+                    name: Pho Saigon
+                    score: 5
+                    first_count: 1
+                    second_count: 1
+                    third_count: 0
+                    position: 1
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/teams/{teamId}/polls/{pollId}/finalize:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/PollId'
+    post:
+      tags: [Polls]
+      operationId: finalizePoll
+      summary: Finalize a poll whose closing time has passed
+      description: |
+        **Member.** Normally the server scheduler finalizes polls at `closes_at`; reads also finalize lazily.
+        This operation lets any client force reconciliation (e.g. a CLI right after 11:30). It never closes a
+        poll early: before `closes_at` it fails with `409 poll_not_closable`. **Idempotent**: repeated calls
+        return the same winner, scores and tie-break, with `200`.
+      responses:
+        '200':
+          description: The finalized poll.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Poll'
+              examples:
+                closedPoll:
+                  $ref: '#/components/examples/ClosedPollExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          description: '`poll_not_closable` - `closes_at` has not been reached yet.'
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              example:
+                type: https://docs.wswe.dev/problems/poll-not-closable
+                title: Poll is still running
+                status: 409
+                code: poll_not_closable
+                detail: This poll closes at 2026-11-17T10:30:00Z.
+
+  /v1/teams/{teamId}/polls/{pollId}/ballots:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/PollId'
+    get:
+      tags: [Ballots]
+      operationId: listBallots
+      summary: List named ballots for a poll
+      description: |
+        **Member.** Every member's current ballot with display name, ordered by `submitted_at`. Ballots are
+        intentionally public within the team. For closed polls these are the ballots as submitted at close.
+        Bounded by team size, so not paginated.
+      responses:
+        '200':
+          description: Ballots.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [items]
+                properties:
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/Ballot'
+              example:
+                items:
+                  - poll_id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+                    team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+                    user_id: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+                    display_name: anna
+                    choices:
+                      - 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+                      - 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d
+                    submitted_at: '2026-11-17T08:42:10Z'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+
+  /v1/teams/{teamId}/polls/{pollId}/ballots/me:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+      - $ref: '#/components/parameters/PollId'
+    get:
+      tags: [Ballots]
+      operationId: getMyBallot
+      summary: Get my ballot for a poll
+      description: '**Member.** The caller''s saved ballot. `404 not_found` if the caller has not voted in this poll.'
+      responses:
+        '200':
+          description: My ballot.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ballot'
+              examples:
+                ballot:
+                  $ref: '#/components/examples/BallotExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+    put:
+      tags: [Ballots]
+      operationId: submitBallot
+      summary: Submit or replace my ballot
+      description: |
+        **Member.** Saves the caller's ranked choices, best first. **Replaces** any earlier ballot atomically
+        (idempotent: sending the same choices twice leaves one ballot). Rules:
+        - 1 to 3 restaurant IDs, all distinct (`422 validation_failed`).
+        - Every ID must be a candidate of this poll (`422 invalid_candidate`); archived-but-still-candidate
+          restaurants are valid.
+        - Only while `opens_at <= server_now < closes_at`: before -> `409 poll_not_open`,
+          at/after -> `409 poll_closed` (even if the scheduler has not run yet).
+
+        Returns `201` when the caller had no ballot yet, `200` when one was replaced.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: '#/components/schemas/BallotSubmit'
+            example:
+              choices:
+                - 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+                - 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d
+                - c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f
+      responses:
+        '200':
+          description: Ballot replaced.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ballot'
+              examples:
+                ballot:
+                  $ref: '#/components/examples/BallotExample'
+        '201':
+          description: First ballot saved.
+          content:
+            application/json:
+              schema:
+                $ref: '#/components/schemas/Ballot'
+              examples:
+                ballot:
+                  $ref: '#/components/examples/BallotExample'
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/PollNotAcceptingBallots'
+        '422':
+          description: |
+            `validation_failed` (wrong count / duplicates / malformed IDs) or `invalid_candidate`
+            (an ID is not a candidate of this poll).
+          content:
+            application/problem+json:
+              schema:
+                $ref: '#/components/schemas/Problem'
+              examples:
+                tooMany:
+                  summary: Four choices
+                  value:
+                    type: https://docs.wswe.dev/problems/validation-failed
+                    title: Validation failed
+                    status: 422
+                    code: validation_failed
+                    detail: Pick 1 to 3 different restaurants.
+                    errors:
+                      - pointer: /choices
+                        code: too_many_items
+                        message: At most 3 choices are allowed.
+                notCandidate:
+                  summary: Not a candidate
+                  value:
+                    type: https://docs.wswe.dev/problems/invalid-candidate
+                    title: Not a candidate
+                    status: 422
+                    code: invalid_candidate
+                    detail: Restaurant d4e5f6a7-b8c9-4d0e-9f1a-2b3c4d5e6f7a is not a candidate in this poll.
+                    errors:
+                      - pointer: /choices/1
+                        code: invalid_candidate
+                        message: Not a candidate in this poll.
+    delete:
+      tags: [Ballots]
+      operationId: deleteMyBallot
+      summary: Withdraw my ballot
+      description: |
+        **Member.** Removes the caller's ballot while the poll is open (same time rules as `submitBallot`).
+        Idempotent: `204` even if there was no ballot.
+      responses:
+        '204':
+          description: Ballot withdrawn (or there was none).
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '404':
+          $ref: '#/components/responses/NotFound'
+        '409':
+          $ref: '#/components/responses/PollNotAcceptingBallots'
+
+  /v1/teams/{teamId}/stats/restaurants:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      tags: [Stats]
+      operationId: getRestaurantStats
+      summary: Restaurant win statistics
+      description: |
+        **Member.** Computed from finalized polls only. Powers the "Recently chosen" (sort by `last_won_on`)
+        and "Popular with team" (sort by `wins_recent`, then `wins_total`) shortcuts and history win counts.
+        Includes archived restaurants that have won before. `recent_window` is the number of most recent
+        closed polls counted in `wins_recent` (default 30).
+      parameters:
+        - name: recent_window
+          in: query
+          required: false
+          description: Number of most recent closed polls used for `wins_recent`.
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 365
+            default: 30
+      responses:
+        '200':
+          description: Per-restaurant stats, sorted by `wins_total` descending, then name.
+          content:
+            application/json:
+              schema:
+                type: object
+                required: [recent_window, closed_poll_count, items]
+                properties:
+                  recent_window:
+                    type: integer
+                  closed_poll_count:
+                    type: integer
+                    description: Total closed polls for the team (including no-winner days).
+                  items:
+                    type: array
+                    items:
+                      $ref: '#/components/schemas/RestaurantStats'
+              example:
+                recent_window: 30
+                closed_poll_count: 11
+                items:
+                  - restaurant_id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+                    name: Pho Saigon
+                    archived: false
+                    wins_total: 4
+                    wins_recent: 4
+                    last_won_on: '2026-11-16'
+                    total_points: 61
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+        '422':
+          $ref: '#/components/responses/ValidationFailed'
+
+  /v1/teams/{teamId}/events:
+    parameters:
+      - $ref: '#/components/parameters/TeamId'
+    get:
+      tags: [Events]
+      operationId: streamTeamEvents
+      summary: Subscribe to live team events (Server-Sent Events)
+      description: |
+        **Member.** A long-lived `text/event-stream` (SSE) of changes in one team. Each SSE message has
+        `id` (monotonic per team), `event` (the event type) and `data` (a JSON `TeamEvent`).
+
+        Event types:
+        - `poll.opened`, `poll.closed` (finalized; carries winner), `poll.updated` (candidates changed)
+        - `ballot.submitted`, `ballot.withdrawn` (carry `ballot_count`)
+        - `restaurant.created`, `restaurant.updated`, `restaurant.archived`, `restaurant.unarchived`
+        - `member.joined`, `member.left`, `member.removed`, `member.role_changed`
+        - `team.updated` (name/timezone/schedule), `invite.changed` (no token in payload)
+        - `resync` - the server cannot replay missed events; re-fetch everything.
+
+        Events are invalidation hints; re-fetch the affected resource (e.g. `getCurrentPoll`) for canonical
+        state. The server sends a `: keep-alive` comment every 25s. On reconnect send `Last-Event-ID` to replay
+        missed events (kept ~10 minutes); otherwise you receive `resync`. If the caller loses membership the
+        stream ends. Browsers using `EventSource` authenticate with the session cookie; other clients use
+        the bearer header. Clients that cannot hold a stream may poll `getCurrentPoll` instead.
+      parameters:
+        - name: Last-Event-ID
+          in: header
+          required: false
+          description: ID of the last event received, to resume after a reconnect.
+          schema:
+            type: string
+          example: '48213'
+      responses:
+        '200':
+          description: Event stream (never ends normally).
+          content:
+            text/event-stream:
+              schema:
+                type: string
+                description: SSE frames. Each `data:` line is a JSON-encoded `TeamEvent`.
+                contentMediaType: text/event-stream
+              example: |
+                id: 48214
+                event: ballot.submitted
+                data: {"id":"48214","type":"ballot.submitted","team_id":"7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10","occurred_at":"2026-11-17T09:41:12Z","poll_id":"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","data":{"user_id":"9e4d2c1b-3a5f-4e6d-8c7b-6a5f4e3d2c1b","ballot_count":3}}
+
+                : keep-alive
+
+                id: 48215
+                event: poll.closed
+                data: {"id":"48215","type":"poll.closed","team_id":"7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10","occurred_at":"2026-11-17T10:30:00Z","poll_id":"1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d","data":{"winner_id":"3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9","no_winner":false,"tie_break":null}}
+        '401':
+          $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
+
+components:
+  securitySchemes:
+    bearerAuth:
+      type: http
+      scheme: bearer
+      description: |
+        `Authorization: Bearer <token>` where the token is either a session token (from `signUp`/`signIn`,
+        expires after 30 days of inactivity) or a personal API token (`wswe_pat_...`, from `createApiToken`).
+        Preferred for CLIs, agents and server-side callers.
+    cookieAuth:
+      type: apiKey
+      in: cookie
+      name: wswe_session
+      description: |
+        `HttpOnly; Secure; SameSite=Lax` session cookie set by `signUp`/`signIn`, for browsers (including
+        `EventSource`). Unsafe methods authenticated by cookie require a same-origin `Origin` header.
+
+  parameters:
+    TeamId:
+      name: teamId
+      in: path
+      required: true
+      description: Team ID.
+      schema:
+        type: string
+        format: uuid
+      example: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+    PollId:
+      name: pollId
+      in: path
+      required: true
+      description: Poll ID.
+      schema:
+        type: string
+        format: uuid
+      example: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+    RestaurantId:
+      name: restaurantId
+      in: path
+      required: true
+      description: Restaurant ID.
+      schema:
+        type: string
+        format: uuid
+      example: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+    UserId:
+      name: userId
+      in: path
+      required: true
+      description: User ID of a team member.
+      schema:
+        type: string
+        format: uuid
+      example: 9e4d2c1b-3a5f-4e6d-8c7b-6a5f4e3d2c1b
+    TokenId:
+      name: tokenId
+      in: path
+      required: true
+      description: Personal API token ID (not the secret).
+      schema:
+        type: string
+        format: uuid
+      example: 0c6a3e1f-5b7d-4c2a-8e9f-1a2b3c4d5e6f
+    InviteToken:
+      name: inviteToken
+      in: path
+      required: true
+      description: The secret token from an invite link (`/join/{inviteToken}`).
+      schema:
+        type: string
+        minLength: 16
+        maxLength: 128
+      example: q8Zr2mXc4VbN6tLp0sKd
+    PollDate:
+      name: pollDate
+      in: path
+      required: true
+      description: Team-local calendar date of the poll.
+      schema:
+        type: string
+        format: date
+      example: '2026-11-16'
+    Limit:
+      name: limit
+      in: query
+      required: false
+      description: Page size.
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 100
+        default: 20
+    Cursor:
+      name: cursor
+      in: query
+      required: false
+      description: Opaque cursor from a previous page's `next_cursor`.
+      schema:
+        type: string
+    IdempotencyKey:
+      name: Idempotency-Key
+      in: header
+      required: false
+      description: |
+        Optional client-generated unique key (e.g. a UUID). Retrying the same request with the same key within
+        24h returns the original response instead of creating a duplicate. Reusing a key with a different body
+        fails with `409 idempotency_key_reused`.
+      schema:
+        type: string
+        maxLength: 255
+      example: 6f1c2b8e-4a1d-4d0b-9e3c-7a2f5b8c9d01
+    IfMatch:
+      name: If-Match
+      in: header
+      required: false
+      description: ETag from a previous `GET`. If the resource changed since, the update fails with `412 precondition_failed`.
+      schema:
+        type: string
+      example: '"r-17"'
+
+  headers:
+    ETag:
+      description: Version tag of the resource, for `If-Match`.
+      schema:
+        type: string
+      example: '"r-17"'
+    Location:
+      description: URL of the created resource.
+      schema:
+        type: string
+        format: uri-reference
+    SessionCookie:
+      description: '`wswe_session=<token>; HttpOnly; Secure; SameSite=Lax; Path=/` (browsers).'
+      schema:
+        type: string
+    RetryAfter:
+      description: Seconds to wait before retrying.
+      schema:
+        type: integer
+
+  responses:
+    Unauthenticated:
+      description: '`unauthenticated` - missing, invalid, expired or revoked credentials.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.wswe.dev/problems/unauthenticated
+            title: Not signed in
+            status: 401
+            code: unauthenticated
+            detail: Sign in or provide a valid bearer token.
+    Forbidden:
+      description: |
+        `not_a_member` - the caller is not a member of this team; `admins_only` - the operation requires the
+        admin role; `forbidden` - other permission failure (e.g. editing a restaurant you did not create).
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            notAMember:
+              summary: Not a member
+              value:
+                type: https://docs.wswe.dev/problems/not-a-member
+                title: Not a member of this team
+                status: 403
+                code: not_a_member
+            adminsOnly:
+              summary: Admins only
+              value:
+                type: https://docs.wswe.dev/problems/admins-only
+                title: Admins only
+                status: 403
+                code: admins_only
+                detail: Only team admins can change team settings.
+    NotFound:
+      description: '`not_found` - the resource does not exist (within this team).'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.wswe.dev/problems/not-found
+            title: Not found
+            status: 404
+            code: not_found
+            detail: Poll 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d does not exist in this team.
+    InviteInvalid:
+      description: '`invite_invalid` - the invite token is unknown, revoked or was regenerated.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.wswe.dev/problems/invite-invalid
+            title: Invalid invite link
+            status: 404
+            code: invite_invalid
+            detail: This invite link is invalid or was revoked. Ask your team admin for a new one.
+    Conflict:
+      description: '`duplicate_restaurant` or another state conflict; see `code`.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.wswe.dev/problems/duplicate-restaurant
+            title: Restaurant already exists
+            status: 409
+            code: duplicate_restaurant
+            existing_restaurant_id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+    LastAdmin:
+      description: '`last_admin` - the team must keep at least one admin.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.wswe.dev/problems/last-admin
+            title: Team needs an admin
+            status: 409
+            code: last_admin
+            detail: Promote another member to admin first.
+    PollNotAcceptingBallots:
+      description: '`poll_closed` (at/after `closes_at`) or `poll_not_open` (before `opens_at`).'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          examples:
+            closed:
+              summary: Poll closed
+              value:
+                type: https://docs.wswe.dev/problems/poll-closed
+                title: This poll is closed
+                status: 409
+                code: poll_closed
+                detail: Voting closed at 11:30 Europe/Berlin (2026-11-17T10:30:00Z).
+            notOpen:
+              summary: Poll not open yet
+              value:
+                type: https://docs.wswe.dev/problems/poll-not-open
+                title: This poll is not open yet
+                status: 409
+                code: poll_not_open
+                detail: Voting opens at 08:00 Europe/Berlin (2026-11-17T07:00:00Z).
+    PreconditionFailed:
+      description: '`precondition_failed` - `If-Match` did not match the current ETag; re-fetch and retry.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.wswe.dev/problems/precondition-failed
+            title: Resource changed
+            status: 412
+            code: precondition_failed
+    ValidationFailed:
+      description: '`validation_failed` - the request body or parameters are invalid; see `errors`.'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.wswe.dev/problems/validation-failed
+            title: Validation failed
+            status: 422
+            code: validation_failed
+            errors:
+              - pointer: /password
+                code: too_short
+                message: Password should be at least 6 characters.
+    RateLimited:
+      description: '`rate_limited` - too many requests; retry after `Retry-After` seconds.'
+      headers:
+        Retry-After:
+          $ref: '#/components/headers/RetryAfter'
+      content:
+        application/problem+json:
+          schema:
+            $ref: '#/components/schemas/Problem'
+          example:
+            type: https://docs.wswe.dev/problems/rate-limited
+            title: Too many requests
+            status: 429
+            code: rate_limited
+
+  schemas:
+    Uuid:
+      type: string
+      format: uuid
+      examples: [7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10]
+    Timestamp:
+      type: string
+      format: date-time
+      description: UTC instant (RFC 3339).
+      examples: ['2026-11-17T10:30:00Z']
+    LocalTime:
+      type: string
+      pattern: '^([01][0-9]|2[0-3]):[0-5][0-9]$'
+      description: Team-local wall-clock time `HH:MM`.
+      examples: ['08:00']
+    TimeZone:
+      type: string
+      description: IANA timezone name (never a fixed offset).
+      minLength: 1
+      maxLength: 64
+      examples: [Europe/Berlin]
+    Role:
+      type: string
+      enum: [admin, member]
+    PollStatus:
+      type: string
+      enum: [scheduled, open, closed]
+      description: |
+        `scheduled` - exists, not open yet; `open` - accepting ballots (`opens_at <= now < closes_at`);
+        `closed` - finalized and immutable.
+    TieBreak:
+      type: [string, 'null']
+      enum: [first_place_votes, second_place_votes, random_draw, null]
+      description: |
+        How a tie on points was resolved at finalization; `null` if there was no tie for first place or the
+        poll is not closed. `first_place_votes` - most 1st-place votes; `second_place_votes` - then most
+        2nd-place votes; `random_draw` - complete tie, decided by a reproducible seeded draw.
+
+    Problem:
+      type: object
+      description: RFC 9457 problem details, extended with a stable machine-readable `code`.
+      required: [type, title, status, code]
+      properties:
+        type:
+          type: string
+          format: uri
+          description: URI identifying the problem type (documentation link).
+        title:
+          type: string
+          description: Short human-readable summary. Do not parse.
+        status:
+          type: integer
+          description: HTTP status code.
+        detail:
+          type: string
+          description: Human-readable explanation for this occurrence; safe to show to end users.
+        instance:
+          type: string
+          description: Request path or ID of this occurrence.
+        code:
+          type: string
+          description: Stable error code for programmatic handling.
+          enum:
+            - unauthenticated
+            - invalid_credentials
+            - email_taken
+            - validation_failed
+            - not_found
+            - not_a_member
+            - admins_only
+            - forbidden
+            - invite_invalid
+            - last_admin
+            - duplicate_restaurant
+            - invalid_candidate
+            - poll_not_open
+            - poll_closed
+            - poll_not_closable
+            - precondition_failed
+            - idempotency_key_reused
+            - rate_limited
+            - unavailable
+            - internal_error
+        errors:
+          type: array
+          description: Field-level details (for `validation_failed` / `invalid_candidate`).
+          items:
+            type: object
+            required: [pointer, code, message]
+            properties:
+              pointer:
+                type: string
+                description: JSON Pointer (RFC 6901) into the request body, or `?name` for a query parameter.
+              code:
+                type: string
+                description: e.g. `required`, `too_short`, `too_long`, `too_many_items`, `duplicate_items`, `invalid_format`, `invalid_timezone`, `invalid_candidate`.
+              message:
+                type: string
+        existing_restaurant_id:
+          $ref: '#/components/schemas/Uuid'
+          description: Set for `duplicate_restaurant`.
+        request_id:
+          type: string
+          description: Correlation ID; include it when reporting issues.
+
+    Health:
+      type: object
+      required: [status, version, server_time]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        version:
+          type: string
+        server_time:
+          $ref: '#/components/schemas/Timestamp'
+
+    Credentials:
+      type: object
+      required: [email, password]
+      properties:
+        email:
+          type: string
+          format: email
+          maxLength: 254
+        password:
+          type: string
+          minLength: 6
+          maxLength: 200
+          writeOnly: true
+
+    User:
+      type: object
+      required: [id, email, display_name, created_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        email:
+          type: string
+          format: email
+        display_name:
+          type: string
+          description: Shown to teammates. Defaults to the local part of the email.
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    UserUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        display_name:
+          type: string
+          minLength: 1
+          maxLength: 60
+
+    Session:
+      type: object
+      required: [access_token, token_type, expires_at, user]
+      properties:
+        access_token:
+          type: string
+          description: "Opaque session token; send as `Authorization: Bearer <access_token>`."
+        token_type:
+          type: string
+          enum: [Bearer]
+        expires_at:
+          $ref: '#/components/schemas/Timestamp'
+        user:
+          $ref: '#/components/schemas/User'
+
+    ApiTokenCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+          description: Label to recognise the token later (e.g. "lunch-cli on laptop", "Slack agent").
+        expires_at:
+          description: Optional expiry; `null` or omitted means no expiry.
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+
+    ApiToken:
+      type: object
+      required: [id, name, token_prefix, created_at, expires_at, last_used_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        name:
+          type: string
+        token_prefix:
+          type: string
+          description: First characters of the secret, to help identify it.
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        expires_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        last_used_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+
+    ApiTokenWithSecret:
+      allOf:
+        - $ref: '#/components/schemas/ApiToken'
+        - type: object
+          required: [token]
+          properties:
+            token:
+              type: string
+              description: The secret bearer token. Returned only once.
+
+    TeamRef:
+      type: object
+      required: [id, name, timezone]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        name:
+          type: string
+        timezone:
+          $ref: '#/components/schemas/TimeZone'
+
+    MyTeam:
+      type: object
+      required: [role, joined_at, team]
+      properties:
+        role:
+          $ref: '#/components/schemas/Role'
+        joined_at:
+          $ref: '#/components/schemas/Timestamp'
+        team:
+          $ref: '#/components/schemas/TeamRef'
+
+    Schedule:
+      type: object
+      required: [open_time, close_time, weekdays]
+      properties:
+        open_time:
+          $ref: '#/components/schemas/LocalTime'
+        close_time:
+          $ref: '#/components/schemas/LocalTime'
+        weekdays:
+          type: array
+          readOnly: true
+          description: ISO weekdays with polls (1 = Monday). Fixed to Monday-Friday in the MVP.
+          items:
+            type: integer
+            minimum: 1
+            maximum: 7
+
+    Team:
+      type: object
+      required: [id, name, timezone, office, schedule, my_role, member_count, created_at, updated_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        name:
+          type: string
+        timezone:
+          $ref: '#/components/schemas/TimeZone'
+        office:
+          type: [string, 'null']
+          description: Optional office location text.
+        schedule:
+          $ref: '#/components/schemas/Schedule'
+        my_role:
+          $ref: '#/components/schemas/Role'
+        member_count:
+          type: integer
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        updated_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    TeamCreate:
+      type: object
+      required: [name, timezone]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        timezone:
+          $ref: '#/components/schemas/TimeZone'
+        office:
+          type: [string, 'null']
+          maxLength: 120
+        open_time:
+          $ref: '#/components/schemas/LocalTime'
+          default: '08:00'
+        close_time:
+          $ref: '#/components/schemas/LocalTime'
+          default: '11:30'
+        seed_restaurants:
+          type: boolean
+          default: true
+          description: Start with the built-in starter restaurant list (currently a Berlin Friedrichstraße list).
+
+    TeamUpdate:
+      type: object
+      minProperties: 1
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 80
+        timezone:
+          $ref: '#/components/schemas/TimeZone'
+        office:
+          type: [string, 'null']
+          maxLength: 120
+        open_time:
+          $ref: '#/components/schemas/LocalTime'
+        close_time:
+          $ref: '#/components/schemas/LocalTime'
+
+    Member:
+      type: object
+      required: [user_id, display_name, role, joined_at]
+      properties:
+        user_id:
+          $ref: '#/components/schemas/Uuid'
+        display_name:
+          type: string
+        role:
+          $ref: '#/components/schemas/Role'
+        joined_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    MemberUpdate:
+      type: object
+      required: [role]
+      properties:
+        role:
+          $ref: '#/components/schemas/Role'
+
+    Invite:
+      type: object
+      required: [active, token, url, updated_at]
+      properties:
+        active:
+          type: boolean
+        token:
+          type: [string, 'null']
+          description: Secret invite token; `null` when revoked.
+        url:
+          type: [string, 'null']
+          format: uri
+          description: Shareable web URL (`<app origin>/join/<token>`); `null` when revoked.
+        updated_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    InvitePreview:
+      type: object
+      required: [team_id, team_name, member_count, already_member]
+      properties:
+        team_id:
+          $ref: '#/components/schemas/Uuid'
+        team_name:
+          type: string
+        member_count:
+          type: integer
+        already_member:
+          type: boolean
+
+    JoinResult:
+      type: object
+      required: [joined, role, team]
+      properties:
+        joined:
+          type: boolean
+          description: '`true` if this call created the membership, `false` if the caller was already a member.'
+        role:
+          $ref: '#/components/schemas/Role'
+        team:
+          $ref: '#/components/schemas/TeamRef'
+
+    Restaurant:
+      type: object
+      required: [id, team_id, name, cuisine, address, website_url, map_url, notes, archived_at, created_by, created_at, updated_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        team_id:
+          $ref: '#/components/schemas/Uuid'
+        name:
+          type: string
+        cuisine:
+          type: [string, 'null']
+        address:
+          type: [string, 'null']
+        website_url:
+          type: [string, 'null']
+          format: uri
+        map_url:
+          type: [string, 'null']
+          format: uri
+        notes:
+          type: [string, 'null']
+        archived_at:
+          description: When archived; `null` if active.
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+        created_by:
+          description: User who added it; `null` for seeded restaurants.
+          oneOf:
+            - $ref: '#/components/schemas/Uuid'
+            - type: 'null'
+        created_at:
+          $ref: '#/components/schemas/Timestamp'
+        updated_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    RestaurantCreate:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        cuisine:
+          type: [string, 'null']
+          maxLength: 80
+        address:
+          type: [string, 'null']
+          maxLength: 200
+        website_url:
+          type: [string, 'null']
+          format: uri
+          maxLength: 500
+          description: Must be http(s).
+        map_url:
+          type: [string, 'null']
+          format: uri
+          maxLength: 500
+          description: Must be http(s).
+        notes:
+          type: [string, 'null']
+          maxLength: 500
+
+    RestaurantUpdate:
+      type: object
+      minProperties: 1
+      description: Partial update; same field rules as `RestaurantCreate`. Archive state is changed via `archiveRestaurant` / `unarchiveRestaurant`.
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        cuisine:
+          type: [string, 'null']
+          maxLength: 80
+        address:
+          type: [string, 'null']
+          maxLength: 200
+        website_url:
+          type: [string, 'null']
+          format: uri
+          maxLength: 500
+        map_url:
+          type: [string, 'null']
+          format: uri
+          maxLength: 500
+        notes:
+          type: [string, 'null']
+          maxLength: 500
+
+    Candidate:
+      type: object
+      description: A restaurant eligible in a poll, with its name snapshot.
+      required: [id, name, archived]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        name:
+          type: string
+          description: Name as of finalization for closed polls; current name otherwise.
+        archived:
+          type: boolean
+          description: Restaurant has since been archived (still a valid candidate in this poll).
+
+    Standing:
+      type: object
+      required: [restaurant_id, name, score, first_count, second_count, third_count, position]
+      properties:
+        restaurant_id:
+          $ref: '#/components/schemas/Uuid'
+        name:
+          type: string
+        score:
+          type: integer
+          description: '`3*first_count + 2*second_count + third_count`.'
+        first_count:
+          type: integer
+        second_count:
+          type: integer
+        third_count:
+          type: integer
+        position:
+          type: integer
+          minimum: 1
+          description: 1-based display order (score, 1st votes, 2nd votes, name). For closed polls position 1 is the winner.
+
+    Standings:
+      type: object
+      required: [poll_id, status, final, ballot_count, member_count, leader_ids, winner_id, no_winner, tie_break, items]
+      properties:
+        poll_id:
+          $ref: '#/components/schemas/Uuid'
+        status:
+          $ref: '#/components/schemas/PollStatus'
+        final:
+          type: boolean
+          description: '`true` once the poll is closed and these are the final scores.'
+        ballot_count:
+          type: integer
+        member_count:
+          type: integer
+          description: Current team size (participation denominator).
+        leader_ids:
+          type: array
+          description: Candidates currently tied at the top score while open (may be several; empty if no ballots). Not a winner.
+          items:
+            $ref: '#/components/schemas/Uuid'
+        winner_id:
+          oneOf:
+            - $ref: '#/components/schemas/Uuid'
+            - type: 'null'
+        no_winner:
+          type: boolean
+        tie_break:
+          $ref: '#/components/schemas/TieBreak'
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Standing'
+
+    Poll:
+      type: object
+      description: Poll summary (used in lists/history and as the base of `PollDetail`).
+      required: [id, team_id, poll_date, timezone, opens_at, closes_at, status, candidates, winner_id, winner, no_winner, ballot_count, final_scores, tie_break, finalized_at]
+      properties:
+        id:
+          $ref: '#/components/schemas/Uuid'
+        team_id:
+          $ref: '#/components/schemas/Uuid'
+        poll_date:
+          type: string
+          format: date
+          description: Team-local date of the poll.
+        timezone:
+          $ref: '#/components/schemas/TimeZone'
+        opens_at:
+          $ref: '#/components/schemas/Timestamp'
+        closes_at:
+          $ref: '#/components/schemas/Timestamp'
+        status:
+          $ref: '#/components/schemas/PollStatus'
+        candidates:
+          type: array
+          description: Candidate snapshot (ID + name), alphabetical.
+          items:
+            $ref: '#/components/schemas/Candidate'
+        winner_id:
+          description: Winning restaurant; `null` until closed or when `no_winner`.
+          oneOf:
+            - $ref: '#/components/schemas/Uuid'
+            - type: 'null'
+        winner:
+          description: Winner details for convenience (includes website/map links).
+          oneOf:
+            - $ref: '#/components/schemas/Restaurant'
+            - type: 'null'
+        no_winner:
+          type: boolean
+          description: '`true` when the poll closed with zero ballots.'
+        ballot_count:
+          type: integer
+        final_scores:
+          description: Final standings, set once closed; `null` before.
+          oneOf:
+            - type: array
+              items:
+                $ref: '#/components/schemas/Standing'
+            - type: 'null'
+        tie_break:
+          $ref: '#/components/schemas/TieBreak'
+        finalized_at:
+          oneOf:
+            - $ref: '#/components/schemas/Timestamp'
+            - type: 'null'
+
+    PollDetail:
+      description: Poll plus everything the voting screen needs.
+      allOf:
+        - $ref: '#/components/schemas/Poll'
+        - type: object
+          required: [standings, ballots, my_ballot, member_count, server_time]
+          properties:
+            standings:
+              type: array
+              description: Live standings while open; equal to `final_scores` once closed; empty-score rows when scheduled.
+              items:
+                $ref: '#/components/schemas/Standing'
+            ballots:
+              type: array
+              description: Named ballots ordered by `submitted_at`.
+              items:
+                $ref: '#/components/schemas/Ballot'
+            my_ballot:
+              description: The caller's ballot, or `null`.
+              oneOf:
+                - $ref: '#/components/schemas/Ballot'
+                - type: 'null'
+            member_count:
+              type: integer
+            server_time:
+              $ref: '#/components/schemas/Timestamp'
+
+    PollPage:
+      type: object
+      required: [items, next_cursor]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: '#/components/schemas/Poll'
+        next_cursor:
+          type: [string, 'null']
+          description: Pass as `cursor` to get the next page; `null` when there are no more.
+
+    Ballot:
+      type: object
+      required: [poll_id, team_id, user_id, display_name, choices, submitted_at]
+      properties:
+        poll_id:
+          $ref: '#/components/schemas/Uuid'
+        team_id:
+          $ref: '#/components/schemas/Uuid'
+        user_id:
+          $ref: '#/components/schemas/Uuid'
+        display_name:
+          type: string
+        choices:
+          type: array
+          description: Ranked restaurant IDs, best first (3/2/1 points).
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Uuid'
+        submitted_at:
+          $ref: '#/components/schemas/Timestamp'
+
+    BallotSubmit:
+      type: object
+      required: [choices]
+      properties:
+        choices:
+          type: array
+          description: 1-3 distinct candidate restaurant IDs, best first.
+          minItems: 1
+          maxItems: 3
+          uniqueItems: true
+          items:
+            $ref: '#/components/schemas/Uuid'
+
+    RestaurantStats:
+      type: object
+      required: [restaurant_id, name, archived, wins_total, wins_recent, last_won_on, total_points]
+      properties:
+        restaurant_id:
+          $ref: '#/components/schemas/Uuid'
+        name:
+          type: string
+        archived:
+          type: boolean
+        wins_total:
+          type: integer
+        wins_recent:
+          type: integer
+          description: Wins within the last `recent_window` closed polls.
+        last_won_on:
+          type: [string, 'null']
+          format: date
+        total_points:
+          type: integer
+          description: Sum of final scores across all closed polls.
+
+    TeamEvent:
+      type: object
+      description: Payload of one SSE message (`data:` line). Treat as a hint and re-fetch for canonical state.
+      required: [id, type, team_id, occurred_at, data]
+      properties:
+        id:
+          type: string
+          description: Monotonic per team; same as the SSE `id`.
+        type:
+          type: string
+          enum:
+            - poll.opened
+            - poll.updated
+            - poll.closed
+            - ballot.submitted
+            - ballot.withdrawn
+            - restaurant.created
+            - restaurant.updated
+            - restaurant.archived
+            - restaurant.unarchived
+            - member.joined
+            - member.left
+            - member.removed
+            - member.role_changed
+            - team.updated
+            - invite.changed
+            - resync
+        team_id:
+          $ref: '#/components/schemas/Uuid'
+        poll_id:
+          description: Set for `poll.*` and `ballot.*` events.
+          oneOf:
+            - $ref: '#/components/schemas/Uuid'
+            - type: 'null'
+        occurred_at:
+          $ref: '#/components/schemas/Timestamp'
+        data:
+          type: object
+          description: |
+            Small type-specific payload, e.g. `{user_id, ballot_count}` for `ballot.*`,
+            `{restaurant_id}` for `restaurant.*`, `{user_id, role}` for `member.*`,
+            `{winner_id, no_winner, tie_break}` for `poll.closed`. Never contains secrets.
+          additionalProperties: true
+
+  examples:
+    UserExample:
+      value:
+        id: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+        email: anna@company.com
+        display_name: anna
+        created_at: '2026-11-02T08:01:12Z'
+    SessionExample:
+      value:
+        access_token: wswe_ses_Zm9vYmFyYmF6cXV4MTIzNDU2Nzg5MA
+        token_type: Bearer
+        expires_at: '2026-12-17T09:14:03Z'
+        user:
+          id: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+          email: anna@company.com
+          display_name: anna
+          created_at: '2026-11-02T08:01:12Z'
+    TeamExample:
+      value:
+        id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+        name: Design crew
+        timezone: Europe/Berlin
+        office: Berlin Mitte
+        schedule:
+          open_time: '08:00'
+          close_time: '11:30'
+          weekdays: [1, 2, 3, 4, 5]
+        my_role: admin
+        member_count: 6
+        created_at: '2026-11-02T08:05:00Z'
+        updated_at: '2026-11-02T08:05:00Z'
+    InviteExample:
+      value:
+        active: true
+        token: q8Zr2mXc4VbN6tLp0sKd
+        url: https://lunch.local/join/q8Zr2mXc4VbN6tLp0sKd
+        updated_at: '2026-11-02T08:05:00Z'
+    RestaurantExample:
+      value:
+        id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+        team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+        name: Pho Saigon
+        cuisine: Vietnamese
+        address: Reinhardtstraße 12, 10117 Berlin
+        website_url: null
+        map_url: https://www.google.com/maps/search/?api=1&query=Pho+Saigon+Reinhardtstra%C3%9Fe+12
+        notes: Fast at 12:00, slow after 12:30
+        archived_at: null
+        created_by: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+        created_at: '2026-11-02T08:10:00Z'
+        updated_at: '2026-11-02T08:10:00Z'
+    BallotExample:
+      value:
+        poll_id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+        team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+        user_id: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+        display_name: anna
+        choices:
+          - 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+          - 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d
+          - c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f
+        submitted_at: '2026-11-17T08:42:10Z'
+    ClosedPollExample:
+      value:
+        id: 2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e
+        team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+        poll_date: '2026-11-16'
+        timezone: Europe/Berlin
+        opens_at: '2026-11-16T07:00:00Z'
+        closes_at: '2026-11-16T10:30:00Z'
+        status: closed
+        candidates:
+          - id: 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d
+            name: Burrito Bar
+            archived: false
+          - id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+            name: Pho Saigon
+            archived: false
+        winner_id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+        winner:
+          id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+          team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+          name: Pho Saigon
+          cuisine: Vietnamese
+          address: Reinhardtstraße 12, 10117 Berlin
+          website_url: null
+          map_url: https://www.google.com/maps/search/?api=1&query=Pho+Saigon+Reinhardtstra%C3%9Fe+12
+          notes: null
+          archived_at: null
+          created_by: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+          created_at: '2026-11-02T08:10:00Z'
+          updated_at: '2026-11-02T08:10:00Z'
+        no_winner: false
+        ballot_count: 2
+        final_scores:
+          - restaurant_id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+            name: Pho Saigon
+            score: 5
+            first_count: 1
+            second_count: 1
+            third_count: 0
+            position: 1
+          - restaurant_id: 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d
+            name: Burrito Bar
+            score: 5
+            first_count: 1
+            second_count: 1
+            third_count: 0
+            position: 2
+        tie_break: random_draw
+        finalized_at: '2026-11-16T10:30:02Z'
+    ClosedPollDetailExample:
+      value:
+        id: 2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e
+        team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+        poll_date: '2026-11-16'
+        timezone: Europe/Berlin
+        opens_at: '2026-11-16T07:00:00Z'
+        closes_at: '2026-11-16T10:30:00Z'
+        status: closed
+        candidates:
+          - id: 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d
+            name: Burrito Bar
+            archived: false
+          - id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+            name: Pho Saigon
+            archived: false
+        winner_id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+        winner: null
+        no_winner: false
+        ballot_count: 2
+        final_scores:
+          - restaurant_id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+            name: Pho Saigon
+            score: 5
+            first_count: 1
+            second_count: 1
+            third_count: 0
+            position: 1
+          - restaurant_id: 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d
+            name: Burrito Bar
+            score: 5
+            first_count: 1
+            second_count: 1
+            third_count: 0
+            position: 2
+        tie_break: random_draw
+        finalized_at: '2026-11-16T10:30:02Z'
+        standings:
+          - restaurant_id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+            name: Pho Saigon
+            score: 5
+            first_count: 1
+            second_count: 1
+            third_count: 0
+            position: 1
+          - restaurant_id: 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d
+            name: Burrito Bar
+            score: 5
+            first_count: 1
+            second_count: 1
+            third_count: 0
+            position: 2
+        ballots:
+          - poll_id: 2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e
+            team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+            user_id: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+            display_name: anna
+            choices: [3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9, 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d]
+            submitted_at: '2026-11-16T08:12:00Z'
+          - poll_id: 2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e
+            team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+            user_id: 9e4d2c1b-3a5f-4e6d-8c7b-6a5f4e3d2c1b
+            display_name: ben
+            choices: [8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d, 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9]
+            submitted_at: '2026-11-16T09:55:31Z'
+        my_ballot:
+          poll_id: 2b3c4d5e-6f7a-4b8c-9d0e-1f2a3b4c5d6e
+          team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+          user_id: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+          display_name: anna
+          choices: [3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9, 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d]
+          submitted_at: '2026-11-16T08:12:00Z'
+        member_count: 6
+        server_time: '2026-11-17T09:14:03Z'
+    OpenPollDetailExample:
+      value:
+        id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+        team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+        poll_date: '2026-11-17'
+        timezone: Europe/Berlin
+        opens_at: '2026-11-17T07:00:00Z'
+        closes_at: '2026-11-17T10:30:00Z'
+        status: open
+        candidates:
+          - id: 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d
+            name: Burrito Bar
+            archived: false
+          - id: c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f
+            name: Green Bowl
+            archived: false
+          - id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+            name: Pho Saigon
+            archived: false
+        winner_id: null
+        winner: null
+        no_winner: false
+        ballot_count: 1
+        final_scores: null
+        tie_break: null
+        finalized_at: null
+        standings:
+          - restaurant_id: 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+            name: Pho Saigon
+            score: 3
+            first_count: 1
+            second_count: 0
+            third_count: 0
+            position: 1
+          - restaurant_id: 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d
+            name: Burrito Bar
+            score: 2
+            first_count: 0
+            second_count: 1
+            third_count: 0
+            position: 2
+          - restaurant_id: c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f
+            name: Green Bowl
+            score: 1
+            first_count: 0
+            second_count: 0
+            third_count: 1
+            position: 3
+        ballots:
+          - poll_id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+            team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+            user_id: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+            display_name: anna
+            choices:
+              - 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+              - 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d
+              - c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f
+            submitted_at: '2026-11-17T08:42:10Z'
+        my_ballot:
+          poll_id: 1a2b3c4d-5e6f-4a7b-8c9d-0e1f2a3b4c5d
+          team_id: 7d0f6a52-8a8e-4f43-b0a3-2b5f3e1d9c10
+          user_id: 5b1c3f0e-2a4d-4f7e-9c11-0d2b6c8a9e01
+          display_name: anna
+          choices:
+            - 3f2a1b0c-9d8e-4f7a-a6b5-c4d3e2f1a0b9
+            - 8b7a6c5d-4e3f-4a2b-9c1d-0e9f8a7b6c5d
+            - c1d2e3f4-a5b6-4c7d-8e9f-0a1b2c3d4e5f
+          submitted_at: '2026-11-17T08:42:10Z'
+        member_count: 6
+        server_time: '2026-11-17T09:14:03Z'
