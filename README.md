@@ -4,6 +4,9 @@ Links:
 
 - Lovable export: https://github.com/alexeygrigorev/screenshot-spot-on-58
 - Browser automation plugin: https://github.com/alexeygrigorev/agent-browser
+- Article: https://aishippingblog.com/p/i-built-an-ai-agent-team-for-software
+- Agents: https://github.com/AI-Shipping-Labs/website/tree/main/.claude/agents
+- Process: https://github.com/AI-Shipping-Labs/website/blob/main/_docs/PROCESS.md
 
 ## Run locally (frontend + backend)
 
