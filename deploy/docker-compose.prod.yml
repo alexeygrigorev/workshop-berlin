@@ -1,6 +1,9 @@
 # Single-VPS deployment: Caddy (automatic HTTPS) -> app -> Postgres. Only Caddy publishes ports.
 # Usage (from the repo root):
 #   WSWE_IMAGE=wswe:<sha> docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --no-build --wait
+# Rollouts: deploy/rollout.sh starts the new `app` container next to the old one, waits until it is healthy and then
+# stops the old one (zero downtime). That is why `app` has no container_name and publishes no host port; Caddy finds
+# every app container through the compose DNS name `app`. See deploy/README.md, "Zero-downtime rollouts".
 # CI/CD loads a prebuilt image (wswe:<git sha>) on the server and starts it with --no-build. Without WSWE_IMAGE,
 # `up -d --build` builds wswe:prod on the server (manual fallback).
 name: wswe-prod
@@ -28,6 +31,13 @@ services:
       context: ..
       dockerfile: Dockerfile
     restart: unless-stopped
+    stop_grace_period: 30s  # old container drains in-flight requests; uvicorn cuts SSE streams after 10 s
+    # Faster than the image default (30 s) so a new container reports healthy (and a bad one unhealthy) quickly.
+    healthcheck:
+      interval: 3s
+      timeout: 4s
+      start_period: 30s
+      retries: 3
     depends_on:
       db:
         condition: service_healthy

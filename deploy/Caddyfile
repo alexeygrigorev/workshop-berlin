@@ -2,12 +2,36 @@
 {$DOMAIN} {
 	encode zstd gzip
 
-	reverse_proxy app:8000 {
+	reverse_proxy {
+		# During a rollout two `app` containers run for a few seconds. Resolve the compose DNS name `app` again
+		# every second so every running container is an upstream (a plain `app:8000` resolves once and sticks).
+		dynamic a {
+			name app
+			port 8000
+			refresh 1s
+			versions ipv4
+			dial_timeout 1s # a stalled DNS lookup must fail fast (all requests wait for it), then it is retried
+		}
+
+		# Never keep sending traffic to a container that is down or starting: health check + passive marking.
+		health_uri /v1/health
+		health_interval 1s
+		health_timeout 2s
+		health_status 200
+		fail_duration 10s
+		max_fails 1
+		unhealthy_request_count 1
+
+		# A request that hits a container just as it dies (or one that is not up yet) is retried on another one
+		# for up to 10 s instead of becoming a 502.
+		lb_try_duration 10s
+		lb_try_interval 250ms
+
 		# Do not buffer: Server-Sent Events (/v1/.../events) must reach the browser immediately.
 		flush_interval -1
 		# No response timeout (Caddy sets none by default); fail fast only when the app is down.
 		transport http {
-			dial_timeout 5s
+			dial_timeout 2s
 			response_header_timeout 0
 			read_timeout 0
 		}
