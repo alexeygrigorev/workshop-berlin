@@ -9,43 +9,44 @@ from fastapi.responses import JSONResponse
 from . import models as m
 from .errors import ProblemError
 from .scheduling import WEEKDAYS
-from .store import BallotRec, PollRec, RestaurantRec, Store, TeamRec, UserRec
+from .db.models import Ballot, Poll, Restaurant, Team, User
+from .store import Store
 
 
-def user_view(u: UserRec) -> m.User:
+def user_view(u: User) -> m.User:
     return m.User(id=u.id, email=u.email, display_name=u.display_name, created_at=u.created_at)
 
 
-def team_ref(t: TeamRec) -> m.TeamRef:
+def team_ref(t: Team) -> m.TeamRef:
     return m.TeamRef(id=t.id, name=t.name, timezone=t.timezone)
 
 
-def team_view(t: TeamRec, role: str) -> m.Team:
+def team_view(t: Team, role: str) -> m.Team:
     return m.Team(id=t.id, name=t.name, timezone=t.timezone, office=t.office,
                   schedule=m.Schedule(open_time=t.open_time, close_time=t.close_time, weekdays=WEEKDAYS),
                   my_role=role, member_count=len(t.members), created_at=t.created_at, updated_at=t.updated_at)
 
 
-def team_etag(t: TeamRec) -> str:
+def team_etag(t: Team) -> str:
     return f'"t-{t.version}"'
 
 
-def restaurant_view(r: RestaurantRec) -> m.Restaurant:
+def restaurant_view(r: Restaurant) -> m.Restaurant:
     return m.Restaurant(**{f: getattr(r, f) for f in (
         "id", "team_id", "name", "cuisine", "address", "website_url", "map_url", "notes", "archived_at",
         "created_by", "created_at", "updated_at")})
 
 
-def restaurant_etag(r: RestaurantRec) -> str:
+def restaurant_etag(r: Restaurant) -> str:
     return f'"r-{r.version}"'
 
 
-def ballot_view(store: Store, p: PollRec, b: BallotRec) -> m.Ballot:
+def ballot_view(store: Store, p: Poll, b: Ballot) -> m.Ballot:
     return m.Ballot(poll_id=p.id, team_id=p.team_id, user_id=b.user_id, display_name=store.ballot_name(b),
                     choices=b.choices, submitted_at=b.submitted_at)
 
 
-def poll_view(store: Store, team: TeamRec, p: PollRec, now: datetime) -> m.Poll:
+def poll_view(store: Store, team: Team, p: Poll, now: datetime) -> m.Poll:
     closed = p.finalized_at is not None
     names = p.frozen_names if closed else {}
     cands = []
@@ -65,7 +66,7 @@ def poll_view(store: Store, team: TeamRec, p: PollRec, now: datetime) -> m.Poll:
         tie_break=p.tie_break, finalized_at=p.finalized_at)
 
 
-def poll_detail(store: Store, team: TeamRec, p: PollRec, now: datetime, user_id: UUID) -> m.PollDetail:
+def poll_detail(store: Store, team: Team, p: Poll, now: datetime, user_id: UUID) -> m.PollDetail:
     base = poll_view(store, team, p, now)
     ballots = [ballot_view(store, p, b) for b in store.sorted_ballots(p)]
     mine = p.ballots.get(user_id)

@@ -268,7 +268,8 @@ def test_candidate_snapshot_rules(client, api, crew, clock):
 
 def test_history_pagination_and_filters(app, client, api, crew, clock):
     tid, admin = crew["tid"], crew["admin"]
-    app.state.store.teams[__import__("uuid").UUID(tid)].created_at = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    with app.state.uow() as store:
+        store.get_team(__import__("uuid").UUID(tid)).created_at = datetime(2026, 10, 1, tzinfo=timezone.utc)
     # create 7 closed weekday polls by visiting each weekday after close
     days = [d for d in (datetime(2026, 11, 2 + i, 12, 0, tzinfo=timezone.utc) for i in range(0, 12)) if d.weekday() < 5]
     for d in days:
@@ -326,9 +327,13 @@ def test_restaurant_stats(client, api, crew, clock):
 def test_scheduler_tick_creates_and_finalizes(app, client, api, crew, clock):
     tid, admin = crew["tid"], crew["admin"]
     clock.set(OPEN)
-    app.state.store.tick(clock.now())
+    def tick():
+        with app.state.uow() as store:
+            store.tick(clock.now())
+
+    tick()
     clock.set(CLOSE + timedelta(seconds=1))
-    app.state.store.tick(clock.now())
-    app.state.store.tick(clock.now())  # idempotent
+    tick()
+    tick()  # idempotent
     polls = client.get(f"/v1/teams/{tid}/polls?status=any", headers=admin["h"]).json()["items"]
     assert [(p["poll_date"], p["status"]) for p in polls] == [("2026-11-18", "scheduled"), ("2026-11-17", "closed")]

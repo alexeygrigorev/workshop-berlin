@@ -1,7 +1,7 @@
 [project]
 name = "wswe-backend"
 version = "1.0.0"
-description = "Where Should We Eat? - FastAPI backend (in-memory store)"
+description = "Where Should We Eat? - FastAPI backend (SQLite/SQLAlchemy)"
 requires-python = ">=3.11"
 dependencies = [
     "fastapi==0.163.1",
@@ -10,6 +10,8 @@ dependencies = [
     "pydantic-settings==2.16.3",
     "argon2-cffi==25.1.0",
     "tzdata==2026.6",
+    "sqlalchemy==2.0.58",
+    "alembic==1.20.1",
 ]
 
 [dependency-groups]

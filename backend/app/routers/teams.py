@@ -6,7 +6,7 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Response
 
 from .. import models as m
-from ..auth import Principal, get_now, get_store, require
+from ..auth import Principal, get_now, StoreDep, require
 from ..deps import TeamCtx, check_if_match, idempotency_header, if_match_header, team_access
 from ..store import Store
 from ..views import created, idem_replay, team_etag, team_view
@@ -15,7 +15,7 @@ router = APIRouter(prefix="/v1/teams", tags=["Teams"])
 
 
 @router.post("", operation_id="createTeam", status_code=201, response_model=m.Team)
-async def create_team(body: m.TeamCreate, p: Principal = Depends(require("write")), store: Store = Depends(get_store),
+async def create_team(body: m.TeamCreate, p: Principal = Depends(require("write")), store: Store = StoreDep,
                       now: datetime = Depends(get_now), key: str | None = Depends(idempotency_header)):
     fp = "createTeam:" + body.model_dump_json()
     if (hit := idem_replay(store, p.user.id, key, fp, now)):

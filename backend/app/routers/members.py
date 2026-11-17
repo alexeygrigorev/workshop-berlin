@@ -14,7 +14,8 @@ router = APIRouter(prefix="/v1/teams/{teamId}/members", tags=["Members"])
 
 def _member_view(ctx: TeamCtx, user_id: UUID) -> m.Member:
     mem = ctx.team.members[user_id]
-    u = ctx.store.users[user_id]
+    u = ctx.store.get_user(user_id)
+    assert u is not None
     return m.Member(user_id=user_id, display_name=u.display_name, role=mem.role, joined_at=mem.joined_at)
 
 

@@ -1,7 +1,8 @@
 # Where Should We Eat? - backend
 
-FastAPI implementation of [`../api/openapi.yaml`](../api/openapi.yaml) (all 40 operations) with an
-**in-memory store** seeded with demo data. Restarting the server resets everything.
+FastAPI implementation of [`../api/openapi.yaml`](../api/openapi.yaml) (all 40 operations) persisted in a
+**SQL database via SQLAlchemy 2.0** (SQLite by default, schema managed by Alembic) and seeded with demo data on
+first start. Data survives restarts.
 Dependencies are managed with [uv](https://docs.astral.sh/uv/) (`pyproject.toml` + `uv.lock`).
 
 ## Install, run, test
@@ -10,7 +11,8 @@ Dependencies are managed with [uv](https://docs.astral.sh/uv/) (`pyproject.toml`
 cd backend
 uv sync                                                    # creates .venv (gitignored), installs pinned deps incl. dev group
 uv run uvicorn app.main:create_app --factory --port 8000   # http://localhost:8000 (docs at /docs)
-uv run pytest                                              # 65 tests
+uv run pytest                                              # 79 tests (each on a fresh temp SQLite file)
+uv run alembic upgrade head                                # apply migrations by hand (see Database below)
 ```
 
 Note: the spec's local server entry says port 8787; the backend defaults to 8000 as requested. Point the
@@ -18,7 +20,7 @@ frontend (or `servers` in the spec) at whichever you use.
 
 ## Seed data and demo credentials
 
-Seeded at startup (set `WSWE_SEED=false` to start empty). All demo users share the password **`password123`**.
+Seeded at startup into an **empty database only** (set `WSWE_SEED_DEMO_DATA=false` to start empty; delete `wswe.db` to reseed). All demo users share the password **`password123`**.
 
 | email | name | teams |
 |---|---|---|
@@ -54,11 +56,29 @@ curl -X POST localhost:8000/v1/auth/sign-in -H 'content-type: application/json' 
 | `WSWE_CORS_ORIGINS` | `http://localhost:8080,http://localhost:5173,http://localhost:3000` | comma separated CORS allowlist; also the origins trusted for cookie-authenticated unsafe requests |
 | `WSWE_APP_ORIGIN` | first CORS origin | base for invite URLs (`<origin>/join/<token>`) |
 | `WSWE_COOKIE_SECURE` | `false` | set `true` behind HTTPS (the `wswe_session` cookie is always HttpOnly, SameSite=Lax) |
-| `WSWE_SEED` | `true` | seed demo data |
+| `WSWE_DATABASE_URL` | `sqlite:///./wswe.db` | SQLAlchemy URL of the database (the SQLite file is gitignored) |
+| `WSWE_AUTO_MIGRATE` | unset = `true` for SQLite, `false` otherwise | run `alembic upgrade head` at startup |
+| `WSWE_SEED_DEMO_DATA` | `true` | seed demo data at startup, only if the database has no users (never from an endpoint) |
 | `WSWE_SCHEDULER_INTERVAL_SECONDS` | `30` | background tick that creates/opens/finalizes polls (`0` = off; reads also reconcile lazily) |
 | `WSWE_FIXED_NOW` | unset | freeze server time at an ISO instant (demos) |
 | `WSWE_SESSION_DAYS` | `30` | sliding session length |
 | `WSWE_ARGON2_*` | argon2-cffi defaults | `TIME_COST`, `MEMORY_KIB`, `PARALLELISM` |
+
+## Database
+
+- Engine/session: `app/db/session.py`. SQLite-only settings (`check_same_thread=False`, `PRAGMA foreign_keys=ON`,
+  explicit `BEGIN` so SAVEPOINTs work) are applied only for `sqlite:` URLs; other backends use plain defaults.
+- One transaction per request (`app/store.py`, `unit_of_work`): committed when the handler returns, rolled back on
+  any error. SSE events are queued during the request and published only after a successful commit.
+- Schema: `alembic/` (initial migration `0001`). With `WSWE_AUTO_MIGRATE` on (default for SQLite) the app upgrades
+  the schema on startup; otherwise run `uv run alembic upgrade head` (uses `WSWE_DATABASE_URL`, `.env` works too).
+  After changing `app/db/models.py`: `uv run alembic revision --autogenerate -m "what changed"`, review, commit.
+  A test fails if the models and migrations drift apart.
+- Concurrency patterns (portable): unique `(team_id, poll_date)` poll creation via savepoint + re-read; ballot
+  replace is an update of the single `(poll_id, user_id)` row under a `SELECT ... FOR UPDATE` poll lock (no-op on
+  SQLite); finalization re-checks `finalized_at` after taking that lock, so it is idempotent; teams/restaurants use
+  a version column (`UPDATE ... WHERE version = old`, stale writes give `412`).
+- Tokens: only SHA-256 hashes of session and personal API tokens are stored.
 
 ## Layout
 
@@ -68,16 +88,20 @@ app/
   config.py      Settings (env)
   clock.py       Clock / FrozenClock and the get_clock dependency (inject time in tests)
   errors.py      RFC 9457 problem+json, stable error codes, validation-error mapping
-  models.py      pydantic schemas mirroring the spec
-  store.py       in-memory store + domain logic (polls lifecycle, snapshots, finalization, idempotency keys)
+  models.py      pydantic API schemas mirroring the spec (ORM models are in db/models.py)
+  db/            models.py (SQLAlchemy ORM), session.py (engine, sqlite-only tweaks), types.py (UTC datetime, JSON
+                 UUID types), migrate.py (embedded Alembic)
+  store.py       Store (one SQLAlchemy session): data access + domain logic (poll lifecycle, snapshots,
+                 finalization, idempotency keys); unit_of_work() transaction helper
   scoring.py     pure 3/2/1 scoring and tie-break (first, second, seeded draw)
   scheduling.py  team-local weekday/DST window computation (zoneinfo)
   events.py      in-process pub/sub, 10 min replay buffer, SSE stream generator
   auth.py        argon2id hashing, session + personal-API-token auth dependency (scopes, sliding expiry)
   deps.py        team membership/admin dependency, If-Match / Idempotency-Key helpers
   views.py       store records -> API models
-  seed.py        demo data (only used at startup)
+  seed.py        demo data (only used at startup, into an empty DB)
   routers/       health, auth, me (+api tokens), teams, members, invites, restaurants, polls, ballots, stats, events
+alembic/         migration environment and versions
 tests/           pytest + httpx TestClient; every response is validated against api/openapi.yaml (openapi-core)
 ```
 
@@ -93,6 +117,11 @@ tests/           pytest + httpx TestClient; every response is validated against 
 
 ## Not implemented / known gaps
 
-- Persistence (in-memory only), rate limiting (`429 rate_limited` is never returned), `503 unavailable`.
+- Rate limiting (`429 rate_limited` is never returned), `503 unavailable`.
 - Magic-link / Google OAuth (spec says planned).
-- Single-process only: the SSE bus and store are in-process.
+- The SSE bus (and its 10 min replay buffer) is in-process: with several server processes a client only sees
+  events caused by requests handled by the process it is connected to (everything else is still correct; clients
+  refetch on `resync`). Use a shared broker (e.g. Postgres LISTEN/NOTIFY or Redis) to scale out.
+- The scheduler tick runs in every process (it is idempotent and row-locked, so that is safe, just redundant).
+- A lost race on a reused `Idempotency-Key` surfaces as a 500 instead of a replay.
+- Postgres is not exercised by the tests (only SQLite); see the portability notes in the code comments.

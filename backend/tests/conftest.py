@@ -19,7 +19,8 @@ from openapi_core.testing import MockRequest, MockResponse  # noqa: E402
 
 from app.clock import FrozenClock  # noqa: E402
 from app.config import Settings  # noqa: E402
-from app.main import create_app  # noqa: E402
+from app.db.session import Database  # noqa: E402
+from app.main import create_app as _create_app  # noqa: E402
 
 SPEC_PATH = Path(__file__).resolve().parents[2] / "api" / "openapi.yaml"
 OPENAPI = OpenAPI.from_file_path(
@@ -28,6 +29,16 @@ OPENAPI = OpenAPI.from_file_path(
 # Tuesday 2026-11-17 06:00Z == 07:00 Europe/Berlin (CET): one hour before the default poll opens (08:00 local).
 START = datetime(2026, 11, 17, 6, 0, tzinfo=timezone.utc)
 FAST = dict(scheduler_interval_seconds=0, argon2_time_cost=1, argon2_memory_kib=1024, argon2_parallelism=1)
+
+
+
+def make_app(db_path, clock=None, **overrides):
+    """App on a SQLite file; the schema is created straight from the models (migrations are tested separately)."""
+    url = f"sqlite:///{Path(db_path).as_posix()}"
+    Database(url).create_all()
+    opts = {**FAST, "database_url": url, "auto_migrate": False, "seed_demo_data": False, **overrides}
+    return _create_app(Settings(**opts), clock)
+
 
 UNDOCUMENTED: list[str] = []  # (method path status) combos the spec does not declare; reported at the end
 
@@ -65,8 +76,27 @@ def clock():
 
 
 @pytest.fixture()
-def app(clock):
-    return create_app(Settings(seed=False, **FAST), clock)
+def db_path(tmp_path):
+    return tmp_path / "test.db"  # fresh database file per test
+
+
+@pytest.fixture()
+def make(db_path):
+    """Factory for apps on this test's own database: make(clock=None, **settings_overrides)."""
+    apps = []
+
+    def factory(clock=None, **overrides):
+        a = make_app(db_path, clock, **overrides)
+        apps.append(a)
+        return a
+    yield factory
+    for a in apps:
+        a.state.db.dispose()
+
+
+@pytest.fixture()
+def app(make, clock):
+    return make(clock)
 
 
 @pytest.fixture()
@@ -108,8 +138,9 @@ class Api:
     def _admin_h(self, team_id: str) -> dict:
         """Headers of any admin of the team (looked up in the store; test convenience)."""
         import uuid
-        team = self.app.state.store.teams[uuid.UUID(team_id)]
-        admin = next(uid for uid, m in team.members.items() if m.role == "admin")
+        with self.app.state.uow() as store:
+            team = store.get_team(uuid.UUID(team_id))
+            admin = next(uid for uid, m in team.members.items() if m.role == "admin")
         return self._by_id[str(admin)]["h"]
 
     def restaurant(self, team_id: str, user: dict, name: str, **kw) -> dict:

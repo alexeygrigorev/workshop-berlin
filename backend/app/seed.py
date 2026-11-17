@@ -1,4 +1,5 @@
-"""Demo seed data. Used ONLY at startup (never by API endpoints): new teams created via the API start empty.
+"""Demo seed data. Used ONLY at startup, into an empty database (never by API endpoints): new teams created via the
+API start empty.
 
 The restaurant list mirrors frontend/src/lib/seed-restaurants.ts (Berlin Friedrichstrasse).
 """
@@ -11,7 +12,8 @@ from urllib.parse import quote_plus
 
 from . import scheduling
 from .auth import Passwords
-from .store import BallotRec, Membership, PollRec, Store, TeamRec, UserRec
+from .db.models import Ballot, Membership, Poll, Team, User
+from .store import Store
 
 DEMO_PASSWORD = "password123"
 
@@ -39,11 +41,11 @@ def map_url(name: str, address: str) -> str:
     return "https://www.google.com/maps/search/?api=1&query=" + quote_plus(f"{name}, {address}")
 
 
-def _add_ballot(p: PollRec, user: UserRec, choices: list, at: datetime) -> None:
-    p.ballots[user.id] = BallotRec(user.id, list(choices), at)
+def _add_ballot(p: Poll, user: User, choices: list, at: datetime) -> None:
+    p.ballots[user.id] = Ballot(user_id=user.id, choices=list(choices), submitted_at=at)
 
 
-def _seed_restaurants(store: Store, team: TeamRec, creators: list[UserRec], now: datetime, only: list[int] | None = None):
+def _seed_restaurants(store: Store, team: Team, creators: list[User], now: datetime, only: list[int] | None = None):
     out = []
     for i, (name, cuisine, address) in enumerate(FRIEDRICHSTRASSE_SEED):
         if only is not None and i not in only:
@@ -55,7 +57,7 @@ def _seed_restaurants(store: Store, team: TeamRec, creators: list[UserRec], now:
     return out
 
 
-def _history(store: Store, team: TeamRec, users: list[UserRec], rests: list, now: datetime, days: int, rng: random.Random):
+def _history(store: Store, team: Team, users: list[User], rests: list, now: datetime, days: int, rng: random.Random):
     d = scheduling.local_date(now, team.timezone)
     past = []
     while len(past) < days:
@@ -89,7 +91,7 @@ def _stable_id(kind: str, key: str) -> uuid.UUID:
 
 
 def seed(store: Store, passwords: Passwords, now: datetime) -> dict:
-    users: dict[str, UserRec] = {}
+    users: dict[str, User] = {}
     for n, (email, name) in enumerate(DEMO_USERS):
         users[email] = store.add_user(email, passwords.hasher.hash(DEMO_PASSWORD), now - timedelta(days=40 - n), display_name=name, user_id=_stable_id("user", email))
     anna, ben, carla, dmitri, eva = (users[e] for e, _ in DEMO_USERS)
@@ -99,7 +101,7 @@ def seed(store: Store, passwords: Passwords, now: datetime) -> dict:
     t1 = store.create_team(anna, "Design crew", "Europe/Berlin", "Berlin Mitte", "08:00", "11:30", created, team_id=_stable_id("team", "design-crew"))
     t1.invite_token = "demo-design-crew-invite"
     for u, role, days in ((ben, "admin", 29), (carla, "member", 28), (dmitri, "member", 20)):
-        t1.members[u.id] = Membership(u.id, role, now - timedelta(days=days))
+        t1.members[u.id] = Membership(user_id=u.id, role=role, joined_at=now - timedelta(days=days))
     rests1 = _seed_restaurants(store, t1, [anna, ben, carla], now)
     rests1[3].archived_at = now - timedelta(days=3)  # one archived restaurant to show the archived view
     rests1[3].updated_at = rests1[3].archived_at
@@ -108,7 +110,7 @@ def seed(store: Store, passwords: Passwords, now: datetime) -> dict:
     # Team 2: Platform team (Eva admin, Anna member), smaller list
     t2 = store.create_team(eva, "Platform team", "Europe/Berlin", "Berlin Friedrichstraße", "08:30", "11:00", created, team_id=_stable_id("team", "platform-team"))
     t2.invite_token = "demo-platform-team-invite"
-    t2.members[anna.id] = Membership(anna.id, "member", now - timedelta(days=10))
+    t2.members[anna.id] = Membership(user_id=anna.id, role="member", joined_at=now - timedelta(days=10))
     rests2 = _seed_restaurants(store, t2, [eva, anna], now, only=[0, 1, 2, 5, 6, 7])
 
     rng = random.Random(2026)

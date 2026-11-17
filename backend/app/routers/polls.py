@@ -38,17 +38,8 @@ async def list_polls(status: Literal["closed", "open", "scheduled", "any"] = "cl
                      ctx: TeamCtx = Depends(team_access("read"))):
     st, team = ctx.store, ctx.team
     st.reconcile_team(team, ctx.now)
-    polls = list(team.polls.values())
-    if status != "any":
-        polls = [p for p in polls if st.status(p, ctx.now) == status]
-    if from_:
-        polls = [p for p in polls if p.poll_date >= from_]
-    if to:
-        polls = [p for p in polls if p.poll_date <= to]
-    if cursor:
-        before = _decode_cursor(cursor)
-        polls = [p for p in polls if p.poll_date < before]
-    polls.sort(key=lambda p: p.poll_date, reverse=True)
+    before = _decode_cursor(cursor) if cursor else None
+    polls = st.query_polls(team, ctx.now, status, from_, to, before, limit)  # limit + 1 rows
     page = polls[:limit]
     next_cursor = _encode_cursor(page[-1].poll_date) if len(polls) > limit else None
     return m.PollPage(items=[poll_view(st, team, p, ctx.now) for p in page], next_cursor=next_cursor)
@@ -88,7 +79,7 @@ async def get_standings(poll_id: UUID = Path(alias="pollId"), ctx: TeamCtx = Dep
 
 @router.post("/polls/{pollId}/finalize", operation_id="finalizePoll", response_model=m.Poll)
 async def finalize_poll(poll_id: UUID = Path(alias="pollId"), ctx: TeamCtx = Depends(team_access("write"))):
-    p = ctx.team.polls.get(poll_id)
+    p = ctx.store.poll_by_id(ctx.team, poll_id)
     if not p:
         raise not_found(f"Poll {poll_id} does not exist in this team.")
     if p.finalized_at is None and ctx.now < p.closes_at:

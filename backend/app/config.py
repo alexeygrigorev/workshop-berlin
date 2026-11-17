@@ -5,6 +5,7 @@ from datetime import datetime
 from typing import Annotated
 
 from pydantic import field_validator
+from sqlalchemy.engine import make_url
 from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 
@@ -21,7 +22,12 @@ class Settings(BaseSettings):
     # Origin used to build invite URLs: <app_origin>/join/<token>. Defaults to the first CORS origin.
     app_origin: str | None = None
     cookie_secure: bool = False  # set true behind HTTPS
-    seed: bool = True  # seed demo data on startup
+    # Standard SQLAlchemy URL. SQLite by default; e.g. postgresql+psycopg://user:pw@host/db once a driver is installed.
+    database_url: str = "sqlite:///./wswe.db"
+    # Create/upgrade the schema with Alembic at startup. Default (unset): on for SQLite, off for other databases
+    # (run `alembic upgrade head` as a deploy step there).
+    auto_migrate: bool | None = None
+    seed_demo_data: bool = True  # seed demo users/teams/polls on startup, only into an empty database
     scheduler_interval_seconds: float = 30.0  # 0 disables the background tick
     session_days: int = 30
     # Freeze server time at this UTC instant (e.g. 2026-11-17T09:00:00Z) for demos; unset = real clock.
@@ -37,6 +43,12 @@ class Settings(BaseSettings):
         if isinstance(v, str):
             return [o.strip().rstrip("/") for o in v.split(",") if o.strip()]
         return v
+
+    @property
+    def should_auto_migrate(self) -> bool:
+        if self.auto_migrate is not None:
+            return self.auto_migrate
+        return make_url(self.database_url).get_backend_name() == "sqlite"
 
     @property
     def invite_origin(self) -> str:

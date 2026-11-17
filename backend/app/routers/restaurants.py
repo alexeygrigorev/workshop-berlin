@@ -9,20 +9,21 @@ from fastapi import APIRouter, Depends, Path, Query, Response
 from .. import models as m
 from ..deps import TeamCtx, check_if_match, idempotency_header, if_match_header, team_access
 from ..errors import forbidden, not_found
-from ..store import RestaurantRec, norm
+from ..db.models import Restaurant
+from ..store import norm
 from ..views import created, idem_replay, restaurant_etag, restaurant_view
 
 router = APIRouter(prefix="/v1/teams/{teamId}/restaurants", tags=["Restaurants"])
 
 
-def _get(ctx: TeamCtx, rid: UUID) -> RestaurantRec:
+def _get(ctx: TeamCtx, rid: UUID) -> Restaurant:
     r = ctx.team.restaurants.get(rid)
     if not r:
         raise not_found(f"Restaurant {rid} does not exist in this team.")
     return r
 
 
-def _can_edit(ctx: TeamCtx, r: RestaurantRec) -> None:
+def _can_edit(ctx: TeamCtx, r: Restaurant) -> None:
     if ctx.me.role != "admin" and r.created_by != ctx.principal.user.id:
         raise forbidden("forbidden", "Only team admins or the member who added this restaurant can change it.")
 

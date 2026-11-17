@@ -10,13 +10,16 @@ from typing import Callable
 
 from argon2 import PasswordHasher
 from argon2.exceptions import InvalidHashError, VerificationError
+from typing import AsyncIterator
+
 from fastapi import Depends, Request
 from fastapi.concurrency import run_in_threadpool
 
 from .clock import get_clock
 from .config import Settings
 from .errors import forbidden, unauthenticated
-from .store import SessionRec, Store, TokenRec, UserRec
+from .db.models import AuthSession, PersonalAccessToken, User
+from .store import Store, unit_of_work
 
 SESSION_PREFIX = "wswe_ses_"
 PAT_PREFIX = "wswe_pat_"
@@ -50,36 +53,42 @@ class Passwords:
         return self.hasher.check_needs_rehash(hashed)
 
 
-def new_session(store: Store, user: UserRec, now: datetime, days: int) -> tuple[SessionRec, str]:
+def new_session(store: Store, user: User, now: datetime, days: int) -> tuple[AuthSession, str]:
     token = SESSION_PREFIX + secrets.token_urlsafe(32)
-    s = SessionRec(uuid.uuid4(), user.id, sha256(token), now, now + timedelta(days=days))
-    store.sessions[s.id] = s
-    store.sessions_by_hash[s.token_hash] = s.id
+    s = AuthSession(id=uuid.uuid4(), user_id=user.id, token_hash=sha256(token), created_at=now,
+                    expires_at=now + timedelta(days=days), revoked=False)
+    store.db.add(s)
     return s, token
 
 
-def new_api_token(store: Store, user: UserRec, name: str, scopes: list[str], expires_at: datetime | None,
-                  now: datetime) -> tuple[TokenRec, str]:
+def new_api_token(store: Store, user: User, name: str, scopes: list[str], expires_at: datetime | None,
+                  now: datetime) -> tuple[PersonalAccessToken, str]:
     token = PAT_PREFIX + secrets.token_urlsafe(30)
     ordered = [s for s in ("read", "write") if s in scopes]
-    t = TokenRec(uuid.uuid4(), user.id, name, ordered, sha256(token), token[:13], now, expires_at)
-    store.tokens[t.id] = t
-    store.tokens_by_hash[t.token_hash] = t.id
+    t = PersonalAccessToken(id=uuid.uuid4(), user_id=user.id, name=name, scopes=ordered, token_hash=sha256(token),
+                            prefix=token[:13], created_at=now, expires_at=expires_at)
+    store.db.add(t)
     return t, token
 
 
 @dataclass
 class Principal:
-    user: UserRec
+    user: User
     kind: str  # "session" | "pat"
     scopes: frozenset[str]
     via_cookie: bool = False
-    session: SessionRec | None = None
-    token: TokenRec | None = None
+    session: AuthSession | None = None
+    token: PersonalAccessToken | None = None
 
 
-async def get_store(request: Request) -> Store:
-    return request.app.state.store
+async def get_store(request: Request) -> AsyncIterator[Store]:
+    """One transaction per request: committed (then events published) when the handler returns, rolled back on error."""
+    with unit_of_work(request.app.state.db, request.app.state.bus) as store:
+        yield store
+
+
+# function scope: the transaction commits right after the handler returns, *before* the response is sent
+StoreDep = Depends(get_store, scope="function")
 
 
 async def get_now(request: Request, clock=Depends(get_clock)) -> datetime:
@@ -109,18 +118,17 @@ def require(scope: str | None, session_only: bool = False) -> Callable:
     scope=None means no particular scope (e.g. sign-out). session_only rejects personal API tokens
     with 403 insufficient_scope.
     """
-    async def dep(request: Request, store: Store = Depends(get_store), now: datetime = Depends(get_now)) -> Principal:
+    async def dep(request: Request, store: Store = StoreDep, now: datetime = Depends(get_now)) -> Principal:
         token, via_cookie = _bearer(request)
         if not token:
             raise unauthenticated()
         h = sha256(token)
         settings: Settings = request.app.state.settings
-        sid = store.sessions_by_hash.get(h)
-        if sid is not None:
-            s = store.sessions[sid]
+        s = store.session_by_hash(h)
+        if s is not None:
             if s.revoked or s.expires_at <= now:
                 raise unauthenticated("Session expired or revoked. Sign in again.")
-            user = store.users.get(s.user_id)
+            user = store.get_user(s.user_id)
             if not user:
                 raise unauthenticated()
             if via_cookie and request.method in UNSAFE:
@@ -129,13 +137,12 @@ def require(scope: str | None, session_only: bool = False) -> Callable:
             return Principal(user, "session", frozenset({"read", "write"}), via_cookie, session=s)
         if via_cookie:  # the cookie only ever carries session tokens
             raise unauthenticated()
-        tid = store.tokens_by_hash.get(h)
-        if tid is None:
+        t = store.token_by_hash(h)
+        if t is None:
             raise unauthenticated()
-        t = store.tokens[tid]
         if t.revoked_at is not None or (t.expires_at is not None and t.expires_at <= now):
             raise unauthenticated("API token expired or revoked.")
-        user = store.users.get(t.user_id)
+        user = store.get_user(t.user_id)
         if not user:
             raise unauthenticated()
         if session_only:

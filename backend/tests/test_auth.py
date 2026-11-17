@@ -27,10 +27,10 @@ def test_sign_up_in_out_flow(client, api, app):
 
 def test_passwords_are_hashed_with_argon2(client, app):
     client.post("/v1/auth/sign-up", json={"email": "h@x.io", "password": "plaintext-pw"})
-    user = app.state.store.user_by_email("h@x.io")
-    assert user.password_hash.startswith("$argon2id$")
-    assert "plaintext-pw" not in user.password_hash
-    assert "plaintext-pw" not in repr(vars(user).get("password_hash"))
+    with app.state.uow() as store:
+        user = store.user_by_email("h@x.io")
+        assert user.password_hash.startswith("$argon2id$")
+        assert "plaintext-pw" not in user.password_hash
 
 
 def test_duplicate_email_and_validation(client):

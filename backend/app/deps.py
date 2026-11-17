@@ -8,14 +8,15 @@ from uuid import UUID
 
 from fastapi import Depends, Header, Path
 
-from .auth import Principal, get_now, get_store, require
+from .auth import Principal, StoreDep, get_now, require
 from .errors import ProblemError, forbidden, not_found
-from .store import Membership, PollRec, Store, TeamRec
+from .db.models import Membership, Poll, Team
+from .store import Store
 
 
 @dataclass
 class TeamCtx:
-    team: TeamRec
+    team: Team
     me: Membership
     principal: Principal
     store: Store
@@ -24,8 +25,8 @@ class TeamCtx:
 
 def team_access(scope: str, admin: bool = False) -> Callable:
     async def dep(team_id: UUID = Path(alias="teamId"), principal: Principal = Depends(require(scope)),
-                  store: Store = Depends(get_store), now: datetime = Depends(get_now)) -> TeamCtx:
-        team = store.teams.get(team_id)
+                  store: Store = StoreDep, now: datetime = Depends(get_now)) -> TeamCtx:
+        team = store.get_team(team_id)
         me = team.members.get(principal.user.id) if team else None
         if not team or not me:
             raise forbidden("not_a_member", "You are not a member of this team.")
@@ -35,8 +36,8 @@ def team_access(scope: str, admin: bool = False) -> Callable:
     return dep
 
 
-def get_poll(ctx: TeamCtx, poll_id: UUID) -> PollRec:
-    p = ctx.team.polls.get(poll_id)
+def get_poll(ctx: TeamCtx, poll_id: UUID) -> Poll:
+    p = ctx.store.poll_by_id(ctx.team, poll_id)
     if not p:
         raise not_found(f"Poll {poll_id} does not exist in this team.")
     return ctx.store.reconcile(ctx.team, p, ctx.now)

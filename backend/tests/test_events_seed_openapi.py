@@ -90,7 +90,7 @@ async def collect_all(gen):
 
 def test_routes_publish_events(client, api, crew, app, clock):
     tid = crew["tid"]
-    bus = app.state.store.bus
+    bus = app.state.bus
     types = [e[2]["type"] for e in bus._buffers[UUID(tid)]]
     assert types.count("member.joined") == 2 and types.count("restaurant.created") == 3
     before = bus.last_id(UUID(tid))
@@ -112,8 +112,8 @@ def test_events_endpoint_requires_membership(client, api, crew):
 
 
 # ----------------------------------------------------------------------------- seed data
-def test_seed_data_gives_frontend_something_to_show():
-    app = create_app(Settings(seed=True, **FAST), None)
+def test_seed_data_gives_frontend_something_to_show(make):
+    app = make(seed_demo_data=True)
     from app.clock import FrozenClock
     app.state.clock = FrozenClock(START.replace(hour=9))  # Tuesday 10:00 Berlin: poll open
     c = ContractClient(app)
@@ -131,14 +131,15 @@ def test_seed_data_gives_frontend_something_to_show():
     assert {p["tie_break"] for p in hist} >= {"random_draw", "first_place_votes"} and any(p["no_winner"] for p in hist)
     assert c.get(f"/v1/teams/{tid}/restaurants?status=archived", headers=h).json()["items"]
     # seeded passwords are argon2 hashes
-    assert app.state.store.user_by_email("ben@example.com").password_hash.startswith("$argon2")
+    with app.state.uow() as store:
+        assert store.user_by_email("ben@example.com").password_hash.startswith("$argon2")
     assert c.post("/v1/auth/sign-in", json={"email": "anna@example.com", "password": "wrong-one"}).status_code == 401
 
 
-def test_seed_open_poll_has_live_ballots():
+def test_seed_open_poll_has_live_ballots(make):
     from app.clock import FrozenClock
     clock = FrozenClock(START.replace(hour=8, minute=45))  # 09:45 Berlin on a Tuesday
-    app = create_app(Settings(seed=True, **FAST), clock)
+    app = make(clock, seed_demo_data=True)
     c = ContractClient(app)
     h = {"Authorization": "Bearer " + c.post("/v1/auth/sign-in",
          json={"email": "ben@example.com", "password": "password123"}).json()["access_token"]}
@@ -149,8 +150,8 @@ def test_seed_open_poll_has_live_ballots():
     assert any(s["score"] > 0 for s in p["standings"])
 
 
-def test_new_teams_via_api_start_empty_even_with_seed_enabled():
-    app = create_app(Settings(seed=True, **FAST), None)
+def test_new_teams_via_api_start_empty_even_with_seed_enabled(make):
+    app = make(seed_demo_data=True)
     c = ContractClient(app)
     tok = c.post("/v1/auth/sign-up", json={"email": "fresh@example.com", "password": "123456"}).json()["access_token"]
     h = {"Authorization": "Bearer " + tok}
@@ -166,8 +167,8 @@ SPEC_OPS = {(m.upper(), path): op["operationId"] for path, item in SPEC["paths"]
             for m, op in item.items() if m in ("get", "post", "put", "patch", "delete")}
 
 
-def test_every_operation_in_spec_has_a_route_with_same_method_path_and_operation_id():
-    app = create_app(Settings(seed=False, **FAST))
+def test_every_operation_in_spec_has_a_route_with_same_method_path_and_operation_id(make):
+    app = make()
     routes = {(m.upper(), path): op.get("operationId")
               for path, item in app.openapi()["paths"].items() for m, op in item.items()}
     # FastAPI route paths use the spec's own parameter names (aliases), so they compare directly

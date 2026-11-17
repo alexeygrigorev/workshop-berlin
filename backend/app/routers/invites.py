@@ -7,10 +7,11 @@ from datetime import datetime
 from fastapi import APIRouter, Depends, Path, Request, Response
 
 from .. import models as m
-from ..auth import Principal, get_now, get_store, require
+from ..auth import Principal, get_now, StoreDep, require
 from ..deps import TeamCtx, team_access
 from ..errors import ProblemError
-from ..store import Membership, Store, TeamRec
+from ..db.models import Membership, Team
+from ..store import Store
 from ..views import team_ref
 
 public_router = APIRouter(prefix="/v1/invites", tags=["Invites"])
@@ -22,7 +23,7 @@ def _invalid() -> ProblemError:
                         "This invite link is invalid or was revoked. Ask your team admin for a new one.")
 
 
-def _invite_view(request: Request, t: TeamRec) -> m.Invite:
+def _invite_view(request: Request, t: Team) -> m.Invite:
     active = t.invite_token is not None
     url = f"{request.app.state.settings.invite_origin}/join/{t.invite_token}" if active else None
     return m.Invite(active=active, token=t.invite_token, url=url, updated_at=t.invite_updated_at or t.created_at)
@@ -30,7 +31,7 @@ def _invite_view(request: Request, t: TeamRec) -> m.Invite:
 
 @public_router.get("/{inviteToken}", operation_id="getInviteInfo", response_model=m.InvitePreview)
 async def get_invite_info(invite_token: str = Path(alias="inviteToken", min_length=16, max_length=128),
-                          p: Principal = Depends(require("read")), store: Store = Depends(get_store)):
+                          p: Principal = Depends(require("read")), store: Store = StoreDep):
     t = store.team_by_invite(invite_token)
     if not t:
         raise _invalid()
@@ -40,7 +41,7 @@ async def get_invite_info(invite_token: str = Path(alias="inviteToken", min_leng
 
 @public_router.post("/{inviteToken}/accept", operation_id="joinTeam", response_model=m.JoinResult)
 async def join_team(response: Response, invite_token: str = Path(alias="inviteToken", min_length=16, max_length=128),
-                    p: Principal = Depends(require("write")), store: Store = Depends(get_store),
+                    p: Principal = Depends(require("write")), store: Store = StoreDep,
                     now: datetime = Depends(get_now)):
     t = store.team_by_invite(invite_token)
     if not t:
@@ -48,7 +49,7 @@ async def join_team(response: Response, invite_token: str = Path(alias="inviteTo
     existing = t.members.get(p.user.id)
     if existing:
         return m.JoinResult(joined=False, role=existing.role, team=team_ref(t))
-    t.members[p.user.id] = Membership(p.user.id, "member", now)
+    t.members[p.user.id] = Membership(user_id=p.user.id, role="member", joined_at=now)
     store.emit(t, "member.joined", now, user_id=p.user.id, role="member")
     response.status_code = 201
     return m.JoinResult(joined=True, role="member", team=team_ref(t))

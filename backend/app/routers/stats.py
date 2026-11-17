@@ -14,8 +14,7 @@ async def get_restaurant_stats(recent_window: int = Query(default=30, ge=1, le=3
                                ctx: TeamCtx = Depends(team_access("read"))):
     team = ctx.team
     ctx.store.reconcile_team(team, ctx.now)
-    closed = sorted((p for p in team.polls.values() if p.finalized_at is not None),
-                    key=lambda p: p.poll_date, reverse=True)
+    closed = ctx.store.closed_polls(team)  # newest first
     recent = {p.id for p in closed[:recent_window]}
     stats: dict = {}
     for p in closed:
