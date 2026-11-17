@@ -1,6 +1,9 @@
 # workshop-berlin
 
-https://github.com/alexeygrigorev/screenshot-spot-on-58
+Links:
+
+- Lovable export: https://github.com/alexeygrigorev/screenshot-spot-on-58
+- Browser automation plugin: https://github.com/alexeygrigorev/agent-browser
 
 ## Run locally (frontend + backend)
 
