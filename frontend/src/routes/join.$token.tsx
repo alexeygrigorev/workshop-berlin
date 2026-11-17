@@ -1,6 +1,6 @@
 import { createFileRoute, useNavigate } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { teams, auth } from "@/lib/mock-backend";
+import { teams, auth } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/app/Logo";
 import { setAfterAuth } from "@/lib/auth-redirect";

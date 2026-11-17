@@ -5,6 +5,7 @@ The restaurant list mirrors frontend/src/lib/seed-restaurants.ts (Berlin Friedri
 from __future__ import annotations
 
 import random
+import uuid
 from datetime import datetime, timedelta
 from urllib.parse import quote_plus
 
@@ -82,15 +83,20 @@ def _history(store: Store, team: TeamRec, users: list[UserRec], rests: list, now
         store.finalize(team, p, p.closes_at + timedelta(seconds=2))
 
 
+def _stable_id(kind: str, key: str) -> uuid.UUID:
+    """Demo users/teams keep the same ids across restarts, so bookmarked URLs survive a reseed."""
+    return uuid.uuid5(uuid.NAMESPACE_URL, f"wswe-demo/{kind}/{key}")
+
+
 def seed(store: Store, passwords: Passwords, now: datetime) -> dict:
     users: dict[str, UserRec] = {}
     for n, (email, name) in enumerate(DEMO_USERS):
-        users[email] = store.add_user(email, passwords.hasher.hash(DEMO_PASSWORD), now - timedelta(days=40 - n), display_name=name)
+        users[email] = store.add_user(email, passwords.hasher.hash(DEMO_PASSWORD), now - timedelta(days=40 - n), display_name=name, user_id=_stable_id("user", email))
     anna, ben, carla, dmitri, eva = (users[e] for e, _ in DEMO_USERS)
     created = now - timedelta(days=30)
 
     # Team 1: Design crew (Anna admin; Ben admin too; Carla, Dmitri members)
-    t1 = store.create_team(anna, "Design crew", "Europe/Berlin", "Berlin Mitte", "08:00", "11:30", created)
+    t1 = store.create_team(anna, "Design crew", "Europe/Berlin", "Berlin Mitte", "08:00", "11:30", created, team_id=_stable_id("team", "design-crew"))
     t1.invite_token = "demo-design-crew-invite"
     for u, role, days in ((ben, "admin", 29), (carla, "member", 28), (dmitri, "member", 20)):
         t1.members[u.id] = Membership(u.id, role, now - timedelta(days=days))
@@ -100,7 +106,7 @@ def seed(store: Store, passwords: Passwords, now: datetime) -> dict:
     active1 = [r for r in rests1 if r.archived_at is None]
 
     # Team 2: Platform team (Eva admin, Anna member), smaller list
-    t2 = store.create_team(eva, "Platform team", "Europe/Berlin", "Berlin Friedrichstraße", "08:30", "11:00", created)
+    t2 = store.create_team(eva, "Platform team", "Europe/Berlin", "Berlin Friedrichstraße", "08:30", "11:00", created, team_id=_stable_id("team", "platform-team"))
     t2.invite_token = "demo-platform-team-invite"
     t2.members[anna.id] = Membership(anna.id, "member", now - timedelta(days=10))
     rests2 = _seed_restaurants(store, t2, [eva, anna], now, only=[0, 1, 2, 5, 6, 7])

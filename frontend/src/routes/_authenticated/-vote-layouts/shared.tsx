@@ -23,7 +23,7 @@ export function VoteStatus({ v, teamId }: { v: Vote; teamId: string }) {
 
 /** One fixed-height line describing whether the shown ballot is saved. */
 export function SaveState({ v, className }: { v: Vote; className?: string }) {
-  const text = !v.open ? (v.hasBallot ? "Voting closed — your vote counted" : "Voting closed")
+  const text = v.scheduled ? "Voting hasn't opened yet" : !v.open ? (v.hasBallot ? "Voting closed — your vote counted" : "Voting closed")
     : v.dirty ? (v.selected.length ? "Unsaved changes" : v.hasBallot ? "Unsaved: ballot cleared" : "Not voted yet · votes are visible to your team")
     : v.hasBallot ? "Saved ✓" : "Not voted yet · votes are visible to your team";
   return <p className={cn("h-5 truncate text-xs", v.dirty && v.open ? "font-semibold text-primary" : "text-muted-foreground", className)}>{text}</p>;
@@ -49,7 +49,7 @@ export function StandingsList({ v, limit, dense }: { v: Vote; limit?: number; de
           <div className="flex items-baseline gap-2">
             <span className="w-5 shrink-0 text-sm font-bold text-muted-foreground tabular-nums">{i + 1}</span>
             <span className="flex-1 truncate font-semibold">{s.name}</span>
-            {!dense && <span className="hidden text-xs text-muted-foreground tabular-nums sm:inline">{s.first}×1st · {s.second}×2nd · {s.third}×3rd</span>}
+            {!dense && <span className="hidden text-xs text-muted-foreground tabular-nums sm:inline">{s.first_count}×1st · {s.second_count}×2nd · {s.third_count}×3rd</span>}
             <span className="w-14 shrink-0 text-right text-sm tabular-nums">{s.score} pts</span>
           </div>
           <div className={cn("rounded bg-muted", dense ? "mt-1 h-1.5" : "mt-2 h-2")}>

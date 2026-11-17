@@ -1,6 +1,6 @@
 import { createFileRoute, Link } from "@tanstack/react-router";
 import { useEffect, useState } from "react";
-import { auth } from "@/lib/mock-backend";
+import { auth } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import { Logo } from "@/components/app/Logo";
 

@@ -1,28 +1,5 @@
 import { describe, expect, it } from "vitest";
-import { moveChoice, placeChoice, tally, toggleChoice } from "./scoring";
-
-const c = [
-  { id: "a", name: "Alpha" },
-  { id: "b", name: "Bravo" },
-  { id: "c", name: "Charlie" },
-];
-
-describe("scoring", () => {
-  it("awards 3/2/1 points for 1st/2nd/3rd", () => {
-    const s = tally(c, [{ choices: ["a", "b", "c"] }]);
-    expect(s.map((r) => [r.restaurant_id, r.score])).toEqual([["a", 3], ["b", 2], ["c", 1]]);
-  });
-  it("partial ballots give no points to missing ranks", () => {
-    const s = tally(c, [{ choices: ["b"] }]);
-    expect(s.find((r) => r.restaurant_id === "b")!.score).toBe(3);
-    expect(s.find((r) => r.restaurant_id === "a")!.score).toBe(0);
-  });
-  it("ties on points are ordered by first-place votes", () => {
-    // a: 3+1 = 4 (one first), b: 2+2 = 4 (zero first)
-    const s = tally(c, [{ choices: ["a", "b"] }, { choices: ["c", "b", "a"] }]);
-    expect(s[0].restaurant_id).toBe("a");
-  });
-});
+import { moveChoice, placeChoice, toggleChoice } from "./scoring";
 
 describe("tap to rank", () => {
   it("fills ranks in tap order and refuses a fourth", () => {

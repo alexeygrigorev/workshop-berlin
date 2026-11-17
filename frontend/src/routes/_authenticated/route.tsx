@@ -1,5 +1,5 @@
 import { createFileRoute, Outlet, redirect } from "@tanstack/react-router";
-import { auth } from "@/lib/mock-backend";
+import { auth } from "@/lib/api";
 
 export const Route = createFileRoute("/_authenticated")({
   ssr: false,

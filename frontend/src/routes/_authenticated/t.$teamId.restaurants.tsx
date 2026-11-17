@@ -3,7 +3,7 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import type { Restaurant } from "@/lib/team-data";
 import { useQueryClient } from "@tanstack/react-query";
 import { toast } from "sonner";
-import { restaurants as api } from "@/lib/mock-backend";
+import { restaurants as api, teams as teamsApi } from "@/lib/api";
 import { useRestaurants, useTeam } from "@/lib/team-data";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -72,7 +72,7 @@ function RestaurantsPage() {
     const prev = qc.getQueryData<Restaurant[]>(key);
     qc.setQueryData<Restaurant[]>(key, (old) => old?.map((r) => (r.id === id ? { ...r, archived_at: new Date().toISOString() } : r)));
     try {
-      await api.setArchived(id, true);
+      await api.setArchived(teamId, id, true);
     } catch (err) {
       qc.setQueryData(key, prev);
       toast.error(err instanceof Error ? err.message : "Could not archive restaurant");
@@ -81,8 +81,15 @@ function RestaurantsPage() {
   }
 
   async function copyInvite() {
-    if (!team.data) return;
-    const url = `${window.location.origin}/join/${team.data.invite_token}`;
+    let url: string;
+    try {
+      const invite = await teamsApi.invite(teamId);
+      if (!invite.token) { toast.error("The invite link is turned off. Ask an admin to create a new one."); return; }
+      url = `${window.location.origin}/join/${invite.token}`;
+    } catch (err) {
+      toast.error(err instanceof Error ? err.message : "Could not get the invite link");
+      return;
+    }
     try { await navigator.clipboard.writeText(url); toast.success("Invite link copied"); }
     catch { toast.error("Could not copy — " + url); }
   }

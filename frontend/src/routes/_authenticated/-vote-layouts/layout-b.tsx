@@ -3,6 +3,7 @@ import { Button } from "@/components/ui/button";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
+import { fmtTime } from "@/lib/time";
 import { RANK_LABEL, SaveButton, SaveState, StandingsList, VotersList } from "./shared";
 import type { Vote } from "./use-vote";
 
@@ -21,7 +22,7 @@ export function LayoutB({ v }: { v: Vote }) {
       <section className="space-y-3">
         <div className="flex h-12 items-center gap-3">
           <div className="min-w-0 flex-1">
-            <h2 className="text-xl font-bold leading-tight">{v.open ? "Tap in order of preference" : "Voting closed"}</h2>
+            <h2 className="text-xl font-bold leading-tight">{v.open ? "Tap in order of preference" : v.scheduled && v.poll ? `Voting opens at ${fmtTime(v.poll.opens_at, v.poll.timezone)}` : "Voting closed"}</h2>
             <SaveState v={v} />
           </div>
           {v.open && <Button variant="ghost" size="sm" disabled={v.selected.length === 0} onClick={v.clear}>Clear</Button>}
