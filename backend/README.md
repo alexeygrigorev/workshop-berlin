@@ -79,6 +79,10 @@ curl -X POST localhost:8000/v1/auth/sign-in -H 'content-type: application/json' 
   SQLite); finalization re-checks `finalized_at` after taking that lock, so it is idempotent; teams/restaurants use
   a version column (`UPDATE ... WHERE version = old`, stale writes give `412`).
 - Tokens: only SHA-256 hashes of session and personal API tokens are stored.
+- **Zero-downtime deploys: migrations must be backwards compatible with the previous release.** During a rollout the
+  old and the new container run side by side against one database (see `deploy/README.md`), so use expand/contract:
+  add tables and nullable/defaulted columns first, remove or rename in a later release. Startup migrations and the
+  demo seed are serialised with a Postgres advisory lock (`app/db/migrate.py`), so concurrent starts are safe.
 
 ### PostgreSQL
 

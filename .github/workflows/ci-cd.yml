@@ -207,6 +207,28 @@ jobs:
           actual="$(sha256sum image/wswe-image.tar.gz | cut -d' ' -f1)"
           echo "tarball sha256 EXPECTED $EXPECTED_SHA256 ACTUAL $actual"
           [ -n "$EXPECTED_SHA256" ] && [ "$actual" = "$EXPECTED_SHA256" ]             || { echo "::error::image tarball sha256 mismatch"; exit 1; }
+      - name: Start availability probe (runs during the deploy)
+        id: probe
+        env:
+          DEPLOY_URL: ${{ vars.DEPLOY_URL }}
+        run: |
+          # Zero-downtime check: request /v1/health about 5 times a second while the deploy runs; the step after the
+          # deploy fails the job if any answer was not HTTP 200. Skipped when DEPLOY_URL is unset (the verify step
+          # below fails with a clear message then).
+          [ -n "$DEPLOY_URL" ] || exit 0
+          log="$RUNNER_TEMP/availability.log"
+          : > "$log"
+          cat > "$RUNNER_TEMP/probe.sh" <<'PROBE'
+          while :; do
+            code="$(curl -s -o /dev/null -w '%{http_code}' --max-time 5 "$URL" || true)"
+            echo "$(date +%s) $code" >> "$LOG"
+            sleep 0.2
+          done
+          PROBE
+          URL="${DEPLOY_URL%/}/v1/health" LOG="$log" setsid nohup sh "$RUNNER_TEMP/probe.sh" >/dev/null 2>&1 &
+          echo "$!" > "$RUNNER_TEMP/availability.pid"
+          sleep 3
+          echo "probe started: $(wc -l < "$log") samples so far"
       - name: Deploy over SSH
         env:
           WSWE_IMAGE: ${{ needs.build-image.outputs.image_tag }}
@@ -228,6 +250,21 @@ jobs:
           chmod 600 "$key_file"
           trap 'rm -f "$key_file"' EXIT
           DEPLOY_SSH_KEY_FILE="$key_file" sh deploy/deploy.sh
+      - name: Check availability during the deploy
+        if: always() && steps.probe.outcome == 'success'
+        run: |
+          pidfile="$RUNNER_TEMP/availability.pid"
+          [ -f "$pidfile" ] && kill "$(cat "$pidfile")" 2>/dev/null || true
+          log="$RUNNER_TEMP/availability.log"
+          [ -s "$log" ] || { echo "no availability probe data (DEPLOY_URL unset?)"; exit 0; }
+          total="$(wc -l < "$log")"
+          bad="$(awk '$2 != 200' "$log" | wc -l)"
+          echo "availability probe: $total requests during the deploy, $bad not HTTP 200"
+          if [ "$bad" -gt 0 ]; then
+            awk '$2 != 200' "$log" | head -20 | while read -r ts code; do echo "$(date -u -d "@$ts" +%H:%M:%S) HTTP $code"; done
+            echo "::error::$bad of $total health requests during the deploy were not HTTP 200 (downtime)"
+            exit 1
+          fi
       - name: Verify the public health endpoint
         env:
           DEPLOY_URL: ${{ vars.DEPLOY_URL }}
