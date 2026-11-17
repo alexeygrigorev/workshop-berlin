@@ -1,2 +1,5 @@
 # Real deployment settings (secrets)
 deploy/.env
+
+# Per-task spec/QA files written by the PM / engineer / QA agents
+.claude/tasks/
