@@ -17,6 +17,7 @@ from .errors import install_error_handlers
 from .events import EventBus
 from .routers import auth, ballots, events, health, invites, me, members, polls, restaurants, stats, teams
 from .seed import seed as seed_data
+from .static import install_static
 from .store import unit_of_work
 
 log = logging.getLogger("wswe")
@@ -66,4 +67,6 @@ def create_app(settings: Settings | None = None, clock: Clock | None = None) -> 
               members.router, invites.team_router, restaurants.router, polls.router, ballots.router, stats.router,
               events.router):
         app.include_router(r)
+    if settings.static_dir:  # last, so API routes take precedence
+        install_static(app, settings.static_dir)
     return app

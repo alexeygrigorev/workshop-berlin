@@ -125,3 +125,13 @@ tests/           pytest + httpx TestClient; every response is validated against 
 - The scheduler tick runs in every process (it is idempotent and row-locked, so that is safe, just redundant).
 - A lost race on a reused `Idempotency-Key` surfaces as a 500 instead of a replay.
 - Postgres is not exercised by the tests (only SQLite); see the portability notes in the code comments.
+
+## Serving the frontend (optional)
+
+Set `WSWE_STATIC_DIR` to a built SPA directory (containing `index.html` and `assets/`, e.g.
+`frontend/dist/client` from `npm run build:static`) and the app serves it at `/`. Unset (default) = disabled, so
+local dev and tests are unaffected. The catch-all is registered after the API routers, so `/v1/*` always wins
+(unknown `/v1/*` paths return 404, not the shell). Non-file paths such as `/teams` or `/join/<token>` fall back to
+`index.html` (`Cache-Control: no-cache`); files under `assets/` get `immutable` one-year caching; missing files with
+an extension return 404; paths escaping the directory are rejected. See `app/static.py` and the Docker section of
+the root README.

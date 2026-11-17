@@ -30,6 +30,8 @@ class Settings(BaseSettings):
     seed_demo_data: bool = True  # seed demo users/teams/polls on startup, only into an empty database
     scheduler_interval_seconds: float = 30.0  # 0 disables the background tick
     session_days: int = 30
+    # Directory with a built SPA (index.html + assets/) to serve at / with index.html fallback. Unset = disabled.
+    static_dir: str | None = None
     # Freeze server time at this UTC instant (e.g. 2026-11-17T09:00:00Z) for demos; unset = real clock.
     fixed_now: datetime | None = None
     # argon2 cost parameters (argon2-cffi defaults); tests lower them for speed.
