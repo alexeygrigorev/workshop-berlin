@@ -47,6 +47,23 @@ info:
     - **Personal API tokens** (`wswe_pat_...`) for CLIs and AI agents, created via `createApiToken`. They act
       as the user who created them, with the same team permissions, and can be revoked at any time.
 
+    **Session expiry:** sessions last 30 days and are *sliding* - every authenticated request renews the
+    expiry to 30 days from that request. There is no separate refresh endpoint; once a session expires
+    (30 days without use) the client gets `401 unauthenticated` and signs in again. `expires_at` in the
+    `signUp` / `signIn` response is the expiry as of sign-in.
+
+    **Token scopes:** personal API tokens carry one or both scopes `read` and `write` (no per-team
+    restriction). Each operation declares the scope it needs in its `security` requirement
+    (`bearerAuth: [read]` or `bearerAuth: [write]`): reads (`GET`, including the event stream) need `read`;
+    everything that changes state needs `write`. Session tokens and the session cookie have both scopes.
+    Managing API tokens and signing out require a session, not an API token. A token lacking the required
+    scope gets `403 insufficient_scope`. Scopes only narrow what a token can do; team role checks
+    (member/admin) still apply.
+
+    **CORS:** the server allows cross-origin browser requests only from a configurable allowlist of origins
+    (the web app's origin by default). Non-browser clients (CLI, agents) are unaffected by CORS. Third-party
+    browser clients should use bearer tokens, so no cookies or `credentials: include` are needed.
+
     Magic-link email and Google OAuth sign-in (specs.md section 2) are planned; they will be additional ways to
     obtain the same session token and will not change any other operation.
 
@@ -65,6 +82,8 @@ info:
   contact:
     name: Where Should We Eat? maintainers
 servers:
+  - url: https://api.example.com
+    description: Production (placeholder - replace with the real deployment URL)
   - url: http://localhost:8787
     description: Local development server
 tags:
@@ -241,11 +260,16 @@ paths:
           description: Signed out.
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   /v1/me:
     get:
       tags: [Me]
       operationId: getCurrentUser
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: Get the signed-in user
       description: |
         **Authenticated.** Returns the user behind the credentials. Use this to check whether a stored
@@ -262,9 +286,14 @@ paths:
                   $ref: '#/components/examples/UserExample'
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
     patch:
       tags: [Me]
       operationId: updateCurrentUser
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Update my profile (display name)
       description: |
         **Authenticated.** Sets the display name shown to teammates next to ballots and in member lists.
@@ -291,6 +320,8 @@ paths:
                 created_at: '2026-11-02T08:01:12Z'
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/ValidationFailed'
 
@@ -298,6 +329,9 @@ paths:
     get:
       tags: [Me]
       operationId: listMyTeams
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: List teams I belong to
       description: '**Authenticated.** All teams the caller is a member of, with the caller''s role in each.'
       responses:
@@ -323,13 +357,15 @@ paths:
                       timezone: Europe/Berlin
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
 
   /v1/me/api-tokens:
     get:
       tags: [API tokens]
       operationId: listApiTokens
       summary: List my personal API tokens
-      description: '**Authenticated.** Lists the caller''s tokens. Secret values are never returned again after creation.'
+      description: '**Authenticated (session only).** Lists the caller''s tokens. Secret values are never returned again after creation.'
       responses:
         '200':
           description: Tokens (without secrets).
@@ -347,12 +383,15 @@ paths:
                 items:
                   - id: 0c6a3e1f-5b7d-4c2a-8e9f-1a2b3c4d5e6f
                     name: lunch-cli on laptop
+                    scopes: [read, write]
                     token_prefix: wswe_pat_3kF9
                     created_at: '2026-11-17T09:20:00Z'
                     expires_at: '2027-11-17T00:00:00Z'
                     last_used_at: '2026-11-17T09:31:44Z'
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
     post:
       tags: [API tokens]
       operationId: createApiToken
@@ -360,7 +399,9 @@ paths:
       description: |
         **Authenticated.** Creates a long-lived bearer token for a CLI or AI agent. The secret `token` is
         returned **only in this response** - store it securely. The token acts as the caller with the
-        caller's team roles.
+        caller's team roles, limited to the requested `scopes` (default both `read` and `write`); use
+        `scopes: [read]` for agents that should only observe. Requires a session (an API token cannot
+        create tokens).
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -371,6 +412,7 @@ paths:
               $ref: '#/components/schemas/ApiTokenCreate'
             example:
               name: lunch-cli on laptop
+              scopes: [read, write]
               expires_at: '2027-11-17T00:00:00Z'
       responses:
         '201':
@@ -382,6 +424,7 @@ paths:
               example:
                 id: 0c6a3e1f-5b7d-4c2a-8e9f-1a2b3c4d5e6f
                 name: lunch-cli on laptop
+                scopes: [read, write]
                 token_prefix: wswe_pat_3kF9
                 created_at: '2026-11-17T09:20:00Z'
                 expires_at: '2027-11-17T00:00:00Z'
@@ -389,6 +432,8 @@ paths:
                 token: wswe_pat_3kF9q2LwXbR7mZt0aVhY8cNdE1sUoPj4
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/ValidationFailed'
 
@@ -399,12 +444,14 @@ paths:
       tags: [API tokens]
       operationId: revokeApiToken
       summary: Revoke a personal API token
-      description: '**Authenticated (token owner).** Revokes immediately. Idempotent: revoking an already-revoked token returns `204`.'
+      description: '**Authenticated (session only, token owner).** Revokes immediately. Idempotent: revoking an already-revoked token returns `204`.'
       responses:
         '204':
           description: Revoked.
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/NotFound'
 
@@ -414,6 +461,9 @@ paths:
     get:
       tags: [Invites]
       operationId: getInviteInfo
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: Preview an invite link
       description: |
         **Authenticated** (any signed-in user; invitees sign in first). Shows which team an invite token
@@ -433,6 +483,8 @@ paths:
                 already_member: false
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/InviteInvalid'
 
@@ -442,6 +494,9 @@ paths:
     post:
       tags: [Invites]
       operationId: joinTeam
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Join a team via invite link
       description: |
         **Authenticated.** Adds the caller to the team as `member`. **Idempotent**: if the caller is already a
@@ -475,6 +530,8 @@ paths:
                   timezone: Europe/Berlin
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '404':
           $ref: '#/components/responses/InviteInvalid'
 
@@ -482,11 +539,14 @@ paths:
     post:
       tags: [Teams]
       operationId: createTeam
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Create a team
       description: |
         **Authenticated.** Creates a team with the caller as its first `admin` and generates an invite link.
-        Schedule defaults to 08:00-11:30, Monday-Friday, team-local. If `seed_restaurants` is true (default,
-        matching the current app) the team starts with a starter restaurant list.
+        Schedule defaults to 08:00-11:30, Monday-Friday, team-local. The team always starts with an
+        **empty** restaurant list; add restaurants with `createRestaurant`.
       parameters:
         - $ref: '#/components/parameters/IdempotencyKey'
       requestBody:
@@ -516,6 +576,8 @@ paths:
                   $ref: '#/components/examples/TeamExample'
         '401':
           $ref: '#/components/responses/Unauthenticated'
+        '403':
+          $ref: '#/components/responses/Forbidden'
         '422':
           $ref: '#/components/responses/ValidationFailed'
 
@@ -525,6 +587,9 @@ paths:
     get:
       tags: [Teams]
       operationId: getTeam
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: Get a team and its settings
       description: '**Member.** Team details, schedule and the caller''s role.'
       responses:
@@ -547,6 +612,9 @@ paths:
     patch:
       tags: [Teams]
       operationId: updateTeam
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Update team settings (name, timezone, office, schedule)
       description: |
         **Admin.** Partial update; only provided fields change. Timezone and schedule changes
@@ -591,6 +659,9 @@ paths:
     get:
       tags: [Members]
       operationId: listMembers
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: List team members
       description: '**Member.** All members ordered by `joined_at` ascending.'
       responses:
@@ -627,6 +698,9 @@ paths:
     delete:
       tags: [Members]
       operationId: leaveTeam
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Leave a team
       description: |
         **Member.** Removes the caller from the team. Ballots already cast stay in history (and in an open
@@ -650,6 +724,9 @@ paths:
     patch:
       tags: [Members]
       operationId: updateMemberRole
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Change a member's role
       description: |
         **Admin.** Promote to `admin` or demote to `member`. Demoting the last admin fails with
@@ -687,6 +764,9 @@ paths:
     delete:
       tags: [Members]
       operationId: removeMember
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Remove a member from the team
       description: |
         **Admin.** Removes another member. Their past ballots remain in history. To remove yourself use
@@ -709,6 +789,9 @@ paths:
     get:
       tags: [Invites]
       operationId: getTeamInvite
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: Get the team's current invite link
       description: |
         **Member.** Returns the active invite token and a ready-to-share URL, or `active: false` after an
@@ -730,6 +813,9 @@ paths:
     delete:
       tags: [Invites]
       operationId: revokeTeamInvite
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Revoke the invite link
       description: |
         **Admin.** Disables the current invite token; nobody can join until an admin calls
@@ -757,6 +843,9 @@ paths:
     post:
       tags: [Invites]
       operationId: regenerateTeamInvite
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Generate a new invite link
       description: |
         **Admin.** Creates a new random invite token, invalidating the previous one (also re-enables a
@@ -782,6 +871,9 @@ paths:
     get:
       tags: [Restaurants]
       operationId: listRestaurants
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: List the team's restaurants
       description: |
         **Member.** Sorted by name (case-insensitive). By default only active restaurants are returned; use
@@ -839,6 +931,9 @@ paths:
     post:
       tags: [Restaurants]
       operationId: createRestaurant
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Add a restaurant
       description: |
         **Member.** Adds a restaurant to the team list. If today's poll is currently `open`, the restaurant is
@@ -906,6 +1001,9 @@ paths:
     get:
       tags: [Restaurants]
       operationId: getRestaurant
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: Get a restaurant
       description: '**Member.** Works for archived restaurants too (needed for history).'
       responses:
@@ -930,10 +1028,15 @@ paths:
     patch:
       tags: [Restaurants]
       operationId: updateRestaurant
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Edit a restaurant
       description: |
         **Admin, or the member who created the restaurant.** Partial update; send `null` to clear an optional
-        field. Renaming does not change the candidate name snapshot of polls that are already closed.
+        field. Renaming: a poll's candidate set is a snapshot of restaurant **IDs** while names are live, so
+        scheduled/open polls show the new name immediately; closed polls keep the name frozen at close
+        (in `candidates` and `final_scores`).
         Same duplicate rule as `createRestaurant`.
       parameters:
         - $ref: '#/components/parameters/IfMatch'
@@ -978,6 +1081,9 @@ paths:
     post:
       tags: [Restaurants]
       operationId: archiveRestaurant
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Archive a restaurant (soft delete)
       description: |
         **Admin, or the member who created the restaurant.** Excludes it from **future** polls. It stays a
@@ -1017,6 +1123,9 @@ paths:
     post:
       tags: [Restaurants]
       operationId: unarchiveRestaurant
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Restore an archived restaurant
       description: |
         **Admin, or the member who created the restaurant.** Makes it active again. Like a newly added
@@ -1047,6 +1156,9 @@ paths:
     get:
       tags: [Polls]
       operationId: listPolls
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: List polls (history)
       description: |
         **Member.** Reverse-chronological by `poll_date`. Defaults to `status=closed`, i.e. the history view.
@@ -1127,6 +1239,9 @@ paths:
     get:
       tags: [Polls]
       operationId: getCurrentPoll
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: Get today's poll (or the next scheduled one), with candidates, ballots and live standings
       description: |
         **Member.** The primary dashboard call. Returns the poll for today's team-local date if today is a poll
@@ -1158,6 +1273,9 @@ paths:
     get:
       tags: [Polls]
       operationId: getPollByDate
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: Get the poll for a team-local date
       description: |
         **Member.** Same payload as `getPoll`. `404 not_found` if no poll exists for that date (weekends,
@@ -1186,6 +1304,9 @@ paths:
     get:
       tags: [Polls]
       operationId: getPoll
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: Get a poll with candidates, ballots and standings
       description: |
         **Member.** For closed polls this is the immutable final snapshot: final standings, tie-break reason
@@ -1214,6 +1335,9 @@ paths:
     get:
       tags: [Polls]
       operationId: getPollStandings
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: Get computed standings for a poll
       description: |
         **Member.** Server-computed scores (3/2/1) with first/second/third counts for every candidate,
@@ -1259,6 +1383,9 @@ paths:
     post:
       tags: [Polls]
       operationId: finalizePoll
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Finalize a poll whose closing time has passed
       description: |
         **Member.** Normally the server scheduler finalizes polls at `closes_at`; reads also finalize lazily.
@@ -1301,6 +1428,9 @@ paths:
     get:
       tags: [Ballots]
       operationId: listBallots
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: List named ballots for a poll
       description: |
         **Member.** Every member's current ballot with display name, ordered by `submitted_at`. Ballots are
@@ -1343,6 +1473,9 @@ paths:
     get:
       tags: [Ballots]
       operationId: getMyBallot
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: Get my ballot for a poll
       description: '**Member.** The caller''s saved ballot. `404 not_found` if the caller has not voted in this poll.'
       responses:
@@ -1364,6 +1497,9 @@ paths:
     put:
       tags: [Ballots]
       operationId: submitBallot
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Submit or replace my ballot
       description: |
         **Member.** Saves the caller's ranked choices, best first. **Replaces** any earlier ballot atomically
@@ -1449,6 +1585,9 @@ paths:
     delete:
       tags: [Ballots]
       operationId: deleteMyBallot
+      security:
+        - bearerAuth: [write]
+        - cookieAuth: []
       summary: Withdraw my ballot
       description: |
         **Member.** Removes the caller's ballot while the poll is open (same time rules as `submitBallot`).
@@ -1471,6 +1610,9 @@ paths:
     get:
       tags: [Stats]
       operationId: getRestaurantStats
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: Restaurant win statistics
       description: |
         **Member.** Computed from finalized polls only. Powers the "Recently chosen" (sort by `last_won_on`)
@@ -1529,6 +1671,9 @@ paths:
     get:
       tags: [Events]
       operationId: streamTeamEvents
+      security:
+        - bearerAuth: [read]
+        - cookieAuth: []
       summary: Subscribe to live team events (Server-Sent Events)
       description: |
         **Member.** A long-lived `text/event-stream` (SSE) of changes in one team. Each SSE message has
@@ -1586,7 +1731,7 @@ components:
       scheme: bearer
       description: |
         `Authorization: Bearer <token>` where the token is either a session token (from `signUp`/`signIn`,
-        expires after 30 days of inactivity) or a personal API token (`wswe_pat_...`, from `createApiToken`).
+        valid for 30 days, renewed on every use - sliding expiry) or a personal API token (`wswe_pat_...`, from `createApiToken`).
         Preferred for CLIs, agents and server-side callers.
     cookieAuth:
       type: apiKey
@@ -1735,7 +1880,9 @@ components:
     Forbidden:
       description: |
         `not_a_member` - the caller is not a member of this team; `admins_only` - the operation requires the
-        admin role; `forbidden` - other permission failure (e.g. editing a restaurant you did not create).
+        admin role; `insufficient_scope` - the API token lacks the required scope (`read`/`write`) or the
+        operation requires a session rather than an API token; `forbidden` - other permission failure (e.g.
+        editing a restaurant you did not create).
       content:
         application/problem+json:
           schema:
@@ -1756,6 +1903,14 @@ components:
                 status: 403
                 code: admins_only
                 detail: Only team admins can change team settings.
+            insufficientScope:
+              summary: API token lacks scope
+              value:
+                type: https://docs.wswe.dev/problems/insufficient-scope
+                title: Insufficient token scope
+                status: 403
+                code: insufficient_scope
+                detail: This operation requires the `write` scope.
     NotFound:
       description: '`not_found` - the resource does not exist (within this team).'
       content:
@@ -1939,6 +2094,7 @@ components:
             - not_a_member
             - admins_only
             - forbidden
+            - insufficient_scope
             - invite_invalid
             - last_admin
             - duplicate_restaurant
@@ -2035,6 +2191,9 @@ components:
           enum: [Bearer]
         expires_at:
           $ref: '#/components/schemas/Timestamp'
+          description: |
+            Session expiry as of this response (30 days from now). Sliding: each authenticated request
+            extends it to 30 days from that request; there is no refresh endpoint.
         user:
           $ref: '#/components/schemas/User'
 
@@ -2047,20 +2206,37 @@ components:
           minLength: 1
           maxLength: 80
           description: Label to recognise the token later (e.g. "lunch-cli on laptop", "Slack agent").
+        scopes:
+          $ref: '#/components/schemas/TokenScopes'
         expires_at:
           description: Optional expiry; `null` or omitted means no expiry.
           oneOf:
             - $ref: '#/components/schemas/Timestamp'
             - type: 'null'
 
+    TokenScopes:
+      type: array
+      description: |
+        `read` - call operations that only read data (`GET`, event stream). `write` - call operations that
+        change state. Defaults to both when omitted on create.
+      minItems: 1
+      uniqueItems: true
+      items:
+        type: string
+        enum: [read, write]
+      default: [read, write]
+      examples: [[read, write]]
+
     ApiToken:
       type: object
-      required: [id, name, token_prefix, created_at, expires_at, last_used_at]
+      required: [id, name, scopes, token_prefix, created_at, expires_at, last_used_at]
       properties:
         id:
           $ref: '#/components/schemas/Uuid'
         name:
           type: string
+        scopes:
+          $ref: '#/components/schemas/TokenScopes'
         token_prefix:
           type: string
           description: First characters of the secret, to help identify it.
@@ -2167,10 +2343,6 @@ components:
         close_time:
           $ref: '#/components/schemas/LocalTime'
           default: '11:30'
-        seed_restaurants:
-          type: boolean
-          default: true
-          description: Start with the built-in starter restaurant list (currently a Berlin Friedrichstraße list).
 
     TeamUpdate:
       type: object
@@ -2279,7 +2451,7 @@ components:
             - $ref: '#/components/schemas/Timestamp'
             - type: 'null'
         created_by:
-          description: User who added it; `null` for seeded restaurants.
+          description: User who added it; `null` if that user's account was deleted (or for dev seed data).
           oneOf:
             - $ref: '#/components/schemas/Uuid'
             - type: 'null'
@@ -2345,14 +2517,14 @@ components:
 
     Candidate:
       type: object
-      description: A restaurant eligible in a poll, with its name snapshot.
+      description: A restaurant eligible in a poll. The ID is the snapshot; the name is live until the poll closes.
       required: [id, name, archived]
       properties:
         id:
           $ref: '#/components/schemas/Uuid'
         name:
           type: string
-          description: Name as of finalization for closed polls; current name otherwise.
+          description: Live current name for scheduled/open polls; frozen at close for closed polls.
         archived:
           type: boolean
           description: Restaurant has since been archived (still a valid candidate in this poll).
