@@ -1,6 +1,8 @@
 # Single-VPS deployment: Caddy (automatic HTTPS) -> app -> Postgres. Only Caddy publishes ports.
 # Usage (from the repo root):
-#   docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --build
+#   WSWE_IMAGE=wswe:<sha> docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --no-build --wait
+# CI/CD loads a prebuilt image (wswe:<git sha>) on the server and starts it with --no-build. Without WSWE_IMAGE,
+# `up -d --build` builds wswe:prod on the server (manual fallback).
 name: wswe-prod
 
 services:
@@ -20,6 +22,8 @@ services:
       retries: 20
 
   app:
+    image: ${WSWE_IMAGE:-wswe:prod}
+    pull_policy: never  # never pull wswe:<sha> from Docker Hub; it is loaded over SSH (or built with --build)
     build:
       context: ..
       dockerfile: Dockerfile

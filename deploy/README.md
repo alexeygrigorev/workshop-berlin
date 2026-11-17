@@ -63,13 +63,39 @@ dc exec -T db psql -U wswe wswe < backup.sql                    # restore (into 
 
 - `backend-tests`: pytest on SQLite and on a Postgres 16 service container.
 - `frontend-tests`: `npm test`, `tsc --noEmit`, `npm run build`, `npm run build:static`.
-- `e2e`: Playwright against its own throw-away docker compose stack (report uploaded as an artifact on failure).
-- `docker-build`: builds the root `Dockerfile` (no push).
-- `deploy`: only on `main` (push or manual run) and only if all of the above passed. It uploads the tree
-  (`git archive`, so no git clone is needed on the server) with `deploy/deploy.sh`, runs
-  `docker compose ... up -d --build --wait`, prunes dangling images, then checks that `$DEPLOY_URL/v1/health`
-  returns 200 (retries for about 2 minutes). `deploy/.env` and the database volume on the server are never touched.
-  The deployed commit is written to `.deployed-sha` on the server (the previous one to `.previous-sha`).
+- `build-image`: builds the root `Dockerfile` once (GHA layer cache) as `wswe:<github sha>`, smoke-tests it (SQLite,
+  `/v1/health`), exports it as a gzipped tarball and uploads it as the `wswe-image` artifact (1 day) together with
+  `image-manifest.json`. Job outputs: `image_tag`, `image_id`, `tar_sha256`.
+- `e2e`: needs `build-image`. Verifies and loads the image, then runs Playwright against its own throw-away docker
+  compose stack from that image (no build; report uploaded as an artifact on failure).
+- `deploy`: only on `main` (push or manual run) and only if all of the above passed. It downloads the same artifact,
+  streams it to the server (`docker load`), uploads the tracked files (`git archive`, no git clone needed) and runs
+  `WSWE_IMAGE=wswe:<sha> docker compose ... up -d --no-build --wait`, then checks that `$DEPLOY_URL/v1/health`
+  returns 200 (retries for about 2 minutes). Nothing is built on the server. `deploy/.env` and the database volume
+  are never touched. The deployed commit is written to `.deployed-sha` (the previous one to `.previous-sha`); the
+  images of the current and the previous release stay on the server, older `wswe:*` images are removed.
+
+### Same image tested and deployed
+
+The image is built once and never rebuilt; every stage checks that it is byte-for-byte the one `build-image` produced
+(the build job's outputs, not the files inside the artifact, are the reference):
+
+1. `build-image` records the image ID (`docker image inspect --format '{{.Id}}'`) and the sha256 of the tarball.
+2. `e2e`: sha256 of the downloaded tarball equals `tar_sha256`; after `docker load` the image ID equals `image_id`;
+   `e2e/global-setup.ts` fails if `WSWE_IMAGE` is missing (it never builds or pulls then) and, once the stack is up,
+   asserts the running app container's image ID equals the expected one. `e2e` reports the ID it tested.
+3. `deploy`: the tested ID must equal the built ID; sha256 of the downloaded tarball equals `tar_sha256`.
+4. On the server `deploy.sh` re-checks the sha256 of what it received, the ID after `docker load`, and, after
+   `up --no-build --wait`, that the running `app` container's image ID equals the expected one. The log prints
+   `EXPECTED ... ACTUAL ...` for each check.
+
+Check by hand: the run's `image-manifest.json` (artifact `wswe-image`, or the `build-image` log) has `image_id`;
+on the server compare it with
+
+```bash
+docker inspect --format '{{.Image}}' "$(dc ps -q app)"    # dc: see step 4 of the setup; same as the manifest image_id
+cat /root/workshop-berlin/.deployed-sha                    # the commit; image tag is wswe:<that sha>
+```
 
 Complete steps 1 to 5 above first (Docker installed, `deploy/.env` created in `/root/workshop-berlin`). The server does
 not need a git clone; the workflow replaces the code in that directory.
@@ -104,10 +130,21 @@ approval. The `deploy` job already uses `environment: production` (GitHub create
 
 - Manual run: Actions > CI/CD > Run workflow (branch `main`), or `gh workflow run ci-cd.yml --ref main`.
 - Logs: the run page in the Actions tab (one log per job); on the server `dc logs -f app caddy`.
-- Rollback: the workflow only deploys the latest `main`:
-  revert the commit on `main`, or check out `.previous-sha` locally and run `deploy/deploy.sh` by hand.
-- Caveat: the image is built on the server (1 vCPU / 2 GB), so a deploy takes a few minutes. Runs are queued, never
-  cancelled, once on `main`.
+- Rollback: the previous release image is still on the server (`docker image ls wswe`, previous sha in
+  `/root/workshop-berlin/.previous-sha`). Run it without a build (database untouched):
+
+  ```bash
+  cd /root/workshop-berlin
+  prev="$(cat .previous-sha)"
+  WSWE_IMAGE="wswe:$prev" docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --no-build --wait
+  echo "$prev" > .deployed-sha
+  ```
+
+  Note that the next CI deploy overwrites this; to make a rollback permanent, revert the commit on `main`.
+- Manual build on the server (fallback, slow on 1 vCPU / 2 GB):
+  `docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env up -d --build` builds `wswe:prod`.
+- Runs are queued, never cancelled, once on `main`. The image tarball (a few hundred MB gzipped) is uploaded over SSH
+  on every deploy.
 
 ## Tear down
 
