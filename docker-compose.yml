@@ -1,4 +1,5 @@
 # Local services. `docker compose up -d --build` runs Postgres and the full app image on :8000;
+# Host ports and the data volume can be overridden (WSWE_DB_PORT, WSWE_APP_PORT, WSWE_PGDATA_VOLUME); the e2e suite does.
 # `docker compose up -d db` starts only Postgres (for `make backend-pg`).
 name: wswe
 
@@ -10,7 +11,7 @@ services:
       POSTGRES_PASSWORD: wswe
       POSTGRES_DB: wswe
     ports:
-      - "5432:5432"
+      - "${WSWE_DB_PORT:-5432}:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
@@ -29,8 +30,8 @@ services:
       WSWE_DATABASE_URL: postgresql+psycopg://wswe:wswe@db:5432/wswe
       WSWE_AUTO_MIGRATE: "true"
     ports:
-      - "8000:8000"
+      - "${WSWE_APP_PORT:-8000}:8000"
 
 volumes:
   pgdata:
-    name: wswe_pgdata  # same volume the old `docker run` used, so existing data is kept
+    name: ${WSWE_PGDATA_VOLUME:-wswe_pgdata}  # default: same volume the old `docker run` used, so existing data is kept; e2e overrides it
