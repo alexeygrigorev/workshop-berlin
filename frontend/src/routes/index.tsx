@@ -31,7 +31,6 @@ function Index() {
       </header>
       <section className="grid flex-1 items-center gap-10 py-16 md:grid-cols-2">
         <div>
-          <p className="mb-4 inline-block rounded-full bg-accent px-3 py-1 text-sm font-semibold">Weekdays · 08:00 – 11:30</p>
           <h1 className="text-5xl font-extrabold leading-[1.02] md:text-6xl">Stop debating. <span className="text-primary">Start eating.</span></h1>
           <p className="mt-5 max-w-md text-lg text-muted-foreground">
             Every workday a fresh vote opens for your team. Tap your top three, watch the standings live, and lunch is decided at 11:30.
