@@ -4,6 +4,8 @@
  * (passwords are stored in plain text). Replace this file to use a real API.
  */
 
+import { FRIEDRICHSTRASSE_SEED, mapUrl } from "@/lib/seed-restaurants";
+
 export type User = { id: string; email: string };
 export type Session = { user: User };
 export type AuthEvent = "SIGNED_IN" | "SIGNED_OUT";
@@ -126,6 +128,18 @@ export const auth = {
 
 // ---------- teams ----------
 
+/** Give a team that has never had restaurants the Friedrichstraße starter list. Returns true if it changed `db`. */
+function seedIfEmpty(db: Db, teamId: string, userId: string | null): boolean {
+  if (db.restaurants.some((r) => r.team_id === teamId)) return false;
+  for (const x of FRIEDRICHSTRASSE_SEED) {
+    db.restaurants.push({
+      id: uid(), team_id: teamId, name: x.name, cuisine: x.cuisine, address: x.address, website_url: null,
+      map_url: mapUrl(x.name, x.address), notes: null, archived_at: null, created_by: userId,
+    });
+  }
+  return true;
+}
+
 export const teams = {
   async mine(): Promise<{ role: Role; team: Pick<Team, "id" | "name" | "timezone"> }[]> {
     await delay();
@@ -151,6 +165,7 @@ export const teams = {
     const team: Team = { id: uid(), name: name.trim(), timezone, office: office || null, invite_token: uid() };
     db.teams.push(team);
     db.members.push({ team_id: team.id, user_id: me.id, role: "admin", joined_at: now() });
+    seedIfEmpty(db, team.id, me.id);
     save(db);
     return team.id;
   },
@@ -205,7 +220,9 @@ export const teams = {
 export const restaurants = {
   async list(teamId: string): Promise<Restaurant[]> {
     await delay();
-    return load().restaurants.filter((r) => r.team_id === teamId).sort((a, b) => a.name.localeCompare(b.name));
+    const db = load();
+    if (db.teams.some((t) => t.id === teamId) && seedIfEmpty(db, teamId, null)) save(db);
+    return db.restaurants.filter((r) => r.team_id === teamId).sort((a, b) => a.name.localeCompare(b.name));
   },
 
   async add(teamId: string, r: Partial<Omit<Restaurant, "id" | "team_id" | "created_by" | "archived_at">> & { name: string }): Promise<Restaurant> {

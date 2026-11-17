@@ -14,6 +14,9 @@ import { Route as AuthenticatedRouteRouteImport } from './routes/_authenticated/
 import { Route as AuthRouteImport } from './routes/auth'
 import { Route as AuthenticatedTeamsRouteImport } from './routes/_authenticated/teams'
 import { Route as JoinTokenRouteImport } from './routes/join.$token'
+import { Route as AuthenticatedTTeamIdRouteImport } from './routes/_authenticated/t.$teamId'
+import { Route as AuthenticatedTTeamIdIndexRouteImport } from './routes/_authenticated/t.$teamId.index'
+import { Route as AuthenticatedTTeamIdRestaurantsRouteImport } from './routes/_authenticated/t.$teamId.restaurants'
 
 const IndexRoute = IndexRouteImport.update({
   id: '/',
@@ -39,18 +42,40 @@ const JoinTokenRoute = JoinTokenRouteImport.update({
   path: '/join/$token',
   getParentRoute: () => rootRouteImport,
 } as any)
+const AuthenticatedTTeamIdRoute = AuthenticatedTTeamIdRouteImport.update({
+  id: '/t/$teamId',
+  path: '/t/$teamId',
+  getParentRoute: () => AuthenticatedRouteRoute,
+} as any)
+const AuthenticatedTTeamIdIndexRoute =
+  AuthenticatedTTeamIdIndexRouteImport.update({
+    id: '/',
+    path: '/',
+    getParentRoute: () => AuthenticatedTTeamIdRoute,
+  } as any)
+const AuthenticatedTTeamIdRestaurantsRoute =
+  AuthenticatedTTeamIdRestaurantsRouteImport.update({
+    id: '/restaurants',
+    path: '/restaurants',
+    getParentRoute: () => AuthenticatedTTeamIdRoute,
+  } as any)
 
 export interface FileRoutesByFullPath {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
   '/teams': typeof AuthenticatedTeamsRoute
   '/join/$token': typeof JoinTokenRoute
+  '/t/$teamId': typeof AuthenticatedTTeamIdRouteWithChildren
+  '/t/$teamId/restaurants': typeof AuthenticatedTTeamIdRestaurantsRoute
+  '/t/$teamId/': typeof AuthenticatedTTeamIdIndexRoute
 }
 export interface FileRoutesByTo {
   '/': typeof IndexRoute
   '/auth': typeof AuthRoute
   '/teams': typeof AuthenticatedTeamsRoute
   '/join/$token': typeof JoinTokenRoute
+  '/t/$teamId/restaurants': typeof AuthenticatedTTeamIdRestaurantsRoute
+  '/t/$teamId': typeof AuthenticatedTTeamIdIndexRoute
 }
 export interface FileRoutesById {
   __root__: typeof rootRouteImport
@@ -59,12 +84,28 @@ export interface FileRoutesById {
   '/auth': typeof AuthRoute
   '/_authenticated/teams': typeof AuthenticatedTeamsRoute
   '/join/$token': typeof JoinTokenRoute
+  '/_authenticated/t/$teamId': typeof AuthenticatedTTeamIdRouteWithChildren
+  '/_authenticated/t/$teamId/restaurants': typeof AuthenticatedTTeamIdRestaurantsRoute
+  '/_authenticated/t/$teamId/': typeof AuthenticatedTTeamIdIndexRoute
 }
 export interface FileRouteTypes {
   fileRoutesByFullPath: FileRoutesByFullPath
-  fullPaths: '/' | '/auth' | '/teams' | '/join/$token'
+  fullPaths:
+    | '/'
+    | '/auth'
+    | '/teams'
+    | '/join/$token'
+    | '/t/$teamId'
+    | '/t/$teamId/restaurants'
+    | '/t/$teamId/'
   fileRoutesByTo: FileRoutesByTo
-  to: '/' | '/auth' | '/teams' | '/join/$token'
+  to:
+    | '/'
+    | '/auth'
+    | '/teams'
+    | '/join/$token'
+    | '/t/$teamId/restaurants'
+    | '/t/$teamId'
   id:
     | '__root__'
     | '/'
@@ -72,6 +113,9 @@ export interface FileRouteTypes {
     | '/auth'
     | '/_authenticated/teams'
     | '/join/$token'
+    | '/_authenticated/t/$teamId'
+    | '/_authenticated/t/$teamId/restaurants'
+    | '/_authenticated/t/$teamId/'
   fileRoutesById: FileRoutesById
 }
 export interface RootRouteChildren {
@@ -118,15 +162,51 @@ declare module '@tanstack/react-router' {
       preLoaderRoute: typeof JoinTokenRouteImport
       parentRoute: typeof rootRouteImport
     }
+    '/_authenticated/t/$teamId': {
+      id: '/_authenticated/t/$teamId'
+      path: '/t/$teamId'
+      fullPath: '/t/$teamId'
+      preLoaderRoute: typeof AuthenticatedTTeamIdRouteImport
+      parentRoute: typeof AuthenticatedRouteRoute
+    }
+    '/_authenticated/t/$teamId/': {
+      id: '/_authenticated/t/$teamId/'
+      path: '/'
+      fullPath: '/t/$teamId/'
+      preLoaderRoute: typeof AuthenticatedTTeamIdIndexRouteImport
+      parentRoute: typeof AuthenticatedTTeamIdRoute
+    }
+    '/_authenticated/t/$teamId/restaurants': {
+      id: '/_authenticated/t/$teamId/restaurants'
+      path: '/restaurants'
+      fullPath: '/t/$teamId/restaurants'
+      preLoaderRoute: typeof AuthenticatedTTeamIdRestaurantsRouteImport
+      parentRoute: typeof AuthenticatedTTeamIdRoute
+    }
   }
 }
 
+interface AuthenticatedTTeamIdRouteChildren {
+  AuthenticatedTTeamIdRestaurantsRoute: typeof AuthenticatedTTeamIdRestaurantsRoute
+  AuthenticatedTTeamIdIndexRoute: typeof AuthenticatedTTeamIdIndexRoute
+}
+
+const AuthenticatedTTeamIdRouteChildren: AuthenticatedTTeamIdRouteChildren = {
+  AuthenticatedTTeamIdRestaurantsRoute: AuthenticatedTTeamIdRestaurantsRoute,
+  AuthenticatedTTeamIdIndexRoute: AuthenticatedTTeamIdIndexRoute,
+}
+
+const AuthenticatedTTeamIdRouteWithChildren =
+  AuthenticatedTTeamIdRoute._addFileChildren(AuthenticatedTTeamIdRouteChildren)
+
 interface AuthenticatedRouteRouteChildren {
   AuthenticatedTeamsRoute: typeof AuthenticatedTeamsRoute
+  AuthenticatedTTeamIdRoute: typeof AuthenticatedTTeamIdRouteWithChildren
 }
 
 const AuthenticatedRouteRouteChildren: AuthenticatedRouteRouteChildren = {
   AuthenticatedTeamsRoute: AuthenticatedTeamsRoute,
+  AuthenticatedTTeamIdRoute: AuthenticatedTTeamIdRouteWithChildren,
 }
 
 const AuthenticatedRouteRouteWithChildren =
