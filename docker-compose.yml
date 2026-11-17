@@ -22,7 +22,9 @@ services:
 
   app:
     build: .
-    image: wswe
+    # WSWE_IMAGE: use a prebuilt image (e.g. loaded from the CI artifact) instead of building; never pulled.
+    image: ${WSWE_IMAGE:-wswe}
+    pull_policy: never
     depends_on:
       db:
         condition: service_healthy
