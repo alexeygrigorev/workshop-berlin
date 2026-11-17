@@ -22,7 +22,7 @@ class Settings(BaseSettings):
     # Origin used to build invite URLs: <app_origin>/join/<token>. Defaults to the first CORS origin.
     app_origin: str | None = None
     cookie_secure: bool = False  # set true behind HTTPS
-    # Standard SQLAlchemy URL. SQLite by default; e.g. postgresql+psycopg://user:pw@host/db once a driver is installed.
+    # Standard SQLAlchemy URL. SQLite by default; e.g. postgresql+psycopg://user:pw@host/db (postgres:// and postgresql:// also work).
     database_url: str = "sqlite:///./wswe.db"
     # Create/upgrade the schema with Alembic at startup. Default (unset): on for SQLite, off for other databases
     # (run `alembic upgrade head` as a deploy step there).

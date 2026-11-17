@@ -12,6 +12,7 @@ dependencies = [
     "tzdata==2026.6",
     "sqlalchemy==2.0.58",
     "alembic==1.20.1",
+    "psycopg[binary]>=3.3.9",
 ]
 
 [dependency-groups]
