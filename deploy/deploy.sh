@@ -17,7 +17,7 @@
 #
 # Uploads `git archive HEAD` (tracked files only, minus e2e/ and .github/) and the image tarball, never touches
 # deploy/.env or the database volume, which live only on the server. Idempotent: safe to re-run.
-# The image is not built on the server. The last two wswe:<sha> tags (current + previous) are kept for rollback.
+# The app is rolled out without downtime (deploy/rollout.sh). The image is not built on the server. The last two wswe:<sha> tags (current + previous) are kept for rollback.
 # shellcheck disable=SC2029  # DEPLOY_* are validated below; client-side expansion is intended
 set -eu
 
@@ -60,7 +60,9 @@ remote="$DEPLOY_USER@$DEPLOY_HOST"
 if [ "$DRY" = 1 ]; then
   echo "[dry-run] would upload git archive of $DEPLOY_SHA and $WSWE_IMAGE_TAR to $remote:$DEPLOY_PATH,"
   echo "[dry-run] verify sha256 $WSWE_IMAGE_SHA256, docker load, check image ID $WSWE_IMAGE_ID,"
-  echo "[dry-run] run $WSWE_IMAGE compose up -d --no-build --wait and verify the running container's image ID"
+  echo "[dry-run] run deploy/rollout.sh for $WSWE_IMAGE (new app container next to the old, then stop the old)"
+echo "[dry-run] and verify that exactly one app container runs, with image ID $WSWE_IMAGE_ID"
+DEPLOY_DRY_RUN=1 sh "$(dirname "$0")/rollout.sh"
   exit 0
 fi
 
@@ -100,12 +102,19 @@ echo "loaded image ID EXPECTED $want_id ACTUAL $got_id"
 # Keep the previous release marker for manual rollback; a re-deploy of the same sha keeps the older marker.
 if [ -f .deployed-sha ] && [ "$(cat .deployed-sha)" != "$sha" ]; then cp .deployed-sha .previous-sha; fi
 dc="docker compose -f deploy/docker-compose.prod.yml --env-file deploy/.env"
-WSWE_IMAGE="$image" $dc up -d --no-build --wait
+# Zero-downtime: the new app container starts next to the old one and the old one is stopped once the new one is
+# healthy (deploy/rollout.sh). On failure the old container keeps serving and this script exits non-zero.
+WSWE_IMAGE="$image" sh deploy/rollout.sh
 
-cid="$(WSWE_IMAGE="$image" $dc ps -q app)"
-run_id="$(docker inspect --format '{{.Image}}' "$cid")"
-echo "running container image ID EXPECTED $want_id ACTUAL $run_id"
-[ "$run_id" = "$want_id" ] || { echo "ERROR: app container is not running the expected image" >&2; exit 1; }
+# After the rollout exactly one app container must run, and it must run the image that was tested.
+cids="$(WSWE_IMAGE="$image" $dc ps -q app)"
+[ "$(printf '%s
+' "$cids" | grep -c .)" -eq 1 ] || { echo "ERROR: expected exactly one running app container, got: $cids" >&2; exit 1; }
+for cid in $cids; do
+  run_id="$(docker inspect --format '{{.Image}}' "$cid")"
+  echo "running container $cid image ID EXPECTED $want_id ACTUAL $run_id"
+  [ "$run_id" = "$want_id" ] || { echo "ERROR: app container is not running the expected image" >&2; exit 1; }
+done
 echo "$sha" > .deployed-sha
 
 # Prune old wswe:<sha> images but keep the current and the previous release (rollback). Volumes are untouched.

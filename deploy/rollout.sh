@@ -62,7 +62,8 @@ if [ "$n" -eq 0 ]; then
   dc up -d --no-build --no-deps --wait app
   new="$(ids)"
 else
-  echo "==> rollout: $n old app container(s): $(echo $old); starting the new one next to it"
+  echo "==> rollout: $n old app container(s): $(echo "$old" | tr '
+' ' '); starting the new one next to it"
   # --no-recreate: the old container keeps running untouched; the extra replica is created from the NEW config/image.
   dc up -d --no-build --no-deps --no-recreate --scale app=$((n + 1)) app
   new="$(minus "$(ids)" "$old")"
