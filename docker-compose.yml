@@ -1,5 +1,5 @@
-# Local services. `docker compose up -d db` starts only Postgres (for `make backend-pg`);
-# `docker compose --profile app up --build` also runs the full app image on :8000.
+# Local services. `docker compose up -d --build` runs Postgres and the full app image on :8000;
+# `docker compose up -d db` starts only Postgres (for `make backend-pg`).
 name: wswe
 
 services:
@@ -20,7 +20,6 @@ services:
       retries: 20
 
   app:
-    profiles: ["app"]
     build: .
     image: wswe
     depends_on:

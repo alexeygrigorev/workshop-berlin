@@ -1,11 +1,12 @@
-.PHONY: frontend backend backend-test frontend-test help up down psql backend-pg
+.PHONY: frontend backend backend-test frontend-test help up db down psql backend-pg
 
 help:
 	@echo "make frontend       run the frontend dev server (vite)"
 	@echo "make backend        run the FastAPI backend on :8000"
 	@echo "make backend-test   run backend tests"
 	@echo "make frontend-test  run frontend tests"
-	@echo "make up             start Postgres via docker compose (waits until healthy)"
+	@echo "make up             docker compose: Postgres + the app image on :8000 (detached)"
+	@echo "make db             docker compose: Postgres only (for make backend-pg)"
 	@echo "make down           stop compose services (data volume kept)"
 	@echo "make psql           psql shell in the db service"
 	@echo "make backend-pg     run the backend on :8000 against the Postgres container"
@@ -23,22 +24,24 @@ backend-test:
 frontend-test:
 	cd frontend && npm test
 
-.PHONY: docker-build docker-run
+.PHONY: docker-build
 docker-build:
 	docker build -t wswe .
 
-docker-run:
-	docker compose --profile app up --build
 
 # ---- PostgreSQL via docker compose (service db, data in volume wswe_pgdata) ----
 PG_URL = postgresql+psycopg://wswe:wswe@localhost:5432/wswe
 
 up:
+	docker compose up -d --build --wait
+	@echo "app: http://localhost:8000  postgres: $(PG_URL)"
+
+db:
 	docker compose up -d --wait db
 	@echo "postgres ready: $(PG_URL)"
 
 down:
-	docker compose --profile app down
+	docker compose down
 
 psql:
 	docker compose exec db psql -U wswe

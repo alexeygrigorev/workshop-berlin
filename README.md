@@ -31,7 +31,8 @@ poll is open; omit it for real time.
 SQLite is the default; PostgreSQL works too (driver `psycopg[binary]` is installed with the backend).
 
 ```sh
-make up           # docker compose: start postgres:16-alpine (service db; volume wswe_pgdata keeps the data)
+make up           # docker compose: Postgres (volume wswe_pgdata keeps the data) + the app image on :8000
+make db           # Postgres only, for the next line
 make backend-pg   # backend on :8000 against it (postgresql+psycopg://wswe:wswe@localhost:5432/wswe), migrates first
 make psql         # psql shell;  make down  stops compose services (data kept)
 ```
@@ -47,17 +48,17 @@ FastAPI backend serves it together with the API (`WSWE_STATIC_DIR`).
 
 ```sh
 make docker-build   # docker build -t wswe .
-make docker-run     # docker run -p 8000:8000 -v wswe-data:/data wswe  -> http://localhost:8000
+make up             # docker compose up: app + Postgres -> http://localhost:8000
 ```
 
 - SQLite lives at `/data/wswe.db` (volume `wswe-data`). Demo data is seeded into an empty DB; disable with
   `-e WSWE_SEED_DEMO_DATA=false`. Sign in as `anna@example.com` / `password123`.
 - If you publish on another host/port, set `-e WSWE_APP_ORIGIN=https://your.host -e WSWE_CORS_ORIGINS=https://your.host`
   (invite links are built from `WSWE_APP_ORIGIN`); behind HTTPS also `-e WSWE_COOKIE_SECURE=true`.
-- Against PostgreSQL instead of SQLite (service from `make up`; migrations are not automatic there, so run
+- Against PostgreSQL instead of SQLite (service from `make db`; migrations are not automatic there, so run
   `WSWE_AUTO_MIGRATE=true` or `alembic upgrade head` first):
-  `make docker-run` (= `docker compose --profile app up --build`) runs the app image on :8000 against the compose `db` service
-  with `WSWE_AUTO_MIGRATE=true`; it needs port 8000 free.
+  `make up` runs the app image on :8000 against the compose `db` service with `WSWE_AUTO_MIGRATE=true`; it needs
+  port 8000 free (stop `make backend`/`backend-pg` first).
   (on Linux add `--add-host=host.docker.internal:host-gateway`).
 - Static frontend build without Docker: `cd frontend && npm run build:static` -> `frontend/dist/client`
   (`npm run build` still produces the SSR/Nitro build).
