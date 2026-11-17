@@ -4,7 +4,10 @@
  * Types are hand-written from the spec.
  */
 
-const BASE_URL = ((import.meta.env["VITE_API_URL"] as string | undefined) || "http://localhost:8000").replace(/\/+$/, "");
+// VITE_API_URL unset -> local dev backend; explicitly empty ("") -> same origin (e.g. the Docker image, where the
+// backend serves the frontend). A relative base is resolved against window.location.origin in request().
+const ENV_API_URL = import.meta.env["VITE_API_URL"] as string | undefined;
+const BASE_URL = (ENV_API_URL !== undefined ? ENV_API_URL : "http://localhost:8000").replace(/\/+$/, "");
 const TOKEN_KEY = "wswe_token";
 
 // ---------- types (mirror api/openapi.yaml) ----------
@@ -112,7 +115,7 @@ async function toError(res: Response): Promise<ApiError> {
 }
 
 async function request<T>(path: string, opts: Opts = {}): Promise<T> {
-  const url = new URL(BASE_URL + path);
+  const url = new URL(BASE_URL + path, typeof window !== "undefined" ? window.location.origin : "http://localhost");
   for (const [k, v] of Object.entries(opts.query ?? {})) if (v !== undefined) url.searchParams.set(k, String(v));
   const headers: Record<string, string> = { Accept: "application/json" };
   if (opts.body !== undefined) headers["Content-Type"] = "application/json";

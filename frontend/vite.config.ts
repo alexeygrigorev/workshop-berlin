@@ -9,10 +9,16 @@
 // You can pass additional config via defineConfig({ vite: { ... }, etc... }) if needed.
 import { defineConfig } from "@lovable.dev/vite-tanstack-config";
 
+// `npm run build:static` (`vite build --mode static`): client-only SPA build for serving from any static file host (used by the
+// Dockerfile). TanStack Start SPA mode prerenders a shell to dist/client/index.html; no Nitro/SSR server is built.
+const staticBuild = process.argv.some((a, i, argv) => a === "--mode" && argv[i + 1] === "static") || process.argv.includes("--mode=static");
+
 export default defineConfig({
   tanstackStart: {
     // Redirect TanStack Start's bundled server entry to src/server.ts (our SSR error wrapper).
     // nitro/vite builds from this
     server: { entry: "server" },
+    ...(staticBuild ? { spa: { enabled: true, prerender: { outputPath: "/index.html" } } } : {}),
   },
+  ...(staticBuild ? { nitro: false as const } : {}),
 });
