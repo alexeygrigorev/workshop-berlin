@@ -68,7 +68,8 @@ dc exec -T db psql -U wswe wswe < backup.sql                    # restore (into 
   `image-manifest.json`. Job outputs: `image_tag`, `image_id`, `tar_sha256`.
 - `e2e`: needs `build-image`. Verifies and loads the image, then runs Playwright against its own throw-away docker
   compose stack from that image (no build; report uploaded as an artifact on failure).
-- `deploy`: only on `main` (push or manual run) and only if all of the above passed. It downloads the same artifact,
+- `deploy`: only on `main` (push or manual run), only if all of the above passed and only if the repository variable
+  `DEPLOY_ENABLED` is `true` (see "Deploy switch" below). It downloads the same artifact,
   streams it to the server (`docker load`), uploads the tracked files (`git archive`, no git clone needed) and runs
   `deploy/rollout.sh` (zero-downtime, see below), then checks that `$DEPLOY_URL/v1/health`
   returns 200 (retries for about 2 minutes). Nothing is built on the server. `deploy/.env` and the database volume
@@ -104,12 +105,26 @@ not need a git clone; the workflow replaces the code in that directory.
 
 | Name | Kind | Meaning |
 | --- | --- | --- |
+| `DEPLOY_ENABLED` | variable | master switch: must be `true` for the `deploy` job to run; unset or anything else = skipped |
 | `DEPLOY_HOST` | secret | server IP or hostname |
 | `DEPLOY_USER` | secret | SSH user (e.g. `root`) |
 | `DEPLOY_SSH_KEY` | secret | private key (OpenSSH, passwordless), full file contents |
 | `DEPLOY_KNOWN_HOSTS` | secret, optional | the server's host key line(s), pins the host; recommended |
 | `DEPLOY_PATH` | variable (or secret), optional | checkout dir on the server, default `/root/workshop-berlin` |
 | `DEPLOY_URL` | variable | public URL for the health check, e.g. `https://203-0-113-7.sslip.io` |
+
+#### Deploy switch
+
+The `deploy` job runs only when `DEPLOY_ENABLED` is `true` (lowercase). If it is unset or anything else, the job is shown
+as "skipped" and the run stays green: all tests still run on every push, nothing contacts the server.
+
+```bash
+gh variable set DEPLOY_ENABLED --body false   # disable deploys (tests still run)
+gh variable set DEPLOY_ENABLED --body true    # re-enable; the next push or manual run deploys
+```
+
+The other `DEPLOY_*` secrets and variables are kept while disabled. Before re-enabling, make sure they are current
+(the server exists and `DEPLOY_HOST`, `DEPLOY_SSH_KEY`, `DEPLOY_KNOWN_HOSTS`, `DEPLOY_URL` point at it).
 
 Create a dedicated deploy key (do not reuse a personal key):
 

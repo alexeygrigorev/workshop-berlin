@@ -185,7 +185,9 @@ jobs:
 
   deploy:
     needs: [backend-tests, frontend-tests, build-image, e2e]
-    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
+    # Master switch: deploys only when the repository variable DEPLOY_ENABLED is 'true' (unset or anything else = skipped,
+    # the run stays green). Flip it with `gh variable set DEPLOY_ENABLED --body true|false`; see deploy/README.md.
+    if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch') && vars.DEPLOY_ENABLED == 'true'
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
