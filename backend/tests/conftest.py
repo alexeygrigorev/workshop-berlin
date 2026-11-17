@@ -2,6 +2,8 @@
 api/openapi.yaml (so every functional test doubles as a contract test)."""
 from __future__ import annotations
 
+import os
+import uuid
 import warnings
 from datetime import datetime, timezone
 from pathlib import Path
@@ -32,9 +34,17 @@ FAST = dict(scheduler_interval_seconds=0, argon2_time_cost=1, argon2_memory_kib=
 
 
 
-def make_app(db_path, clock=None, **overrides):
-    """App on a SQLite file; the schema is created straight from the models (migrations are tested separately)."""
-    url = f"sqlite:///{Path(db_path).as_posix()}"
+# Set WSWE_TEST_DATABASE_URL (e.g. postgresql+psycopg://wswe:wswe@localhost:5432/wswe) to run the suite on
+# PostgreSQL. Each test then gets its own throw-away database (wswe_test_<random>) on that server, dropped
+# afterwards; the database named in the URL itself is only used to connect and is never modified.
+PG_URL = os.environ.get("WSWE_TEST_DATABASE_URL") or None
+ON_PG = PG_URL is not None
+
+
+def make_app(db_url, clock=None, **overrides):
+    """App on a test database (SQLite file path or SQLAlchemy URL); the schema is created straight from the models
+    (migrations are tested separately)."""
+    url = db_url if isinstance(db_url, str) else f"sqlite:///{Path(db_url).as_posix()}"
     Database(url).create_all()
     opts = {**FAST, "database_url": url, "auto_migrate": False, "seed_demo_data": False, **overrides}
     return _create_app(Settings(**opts), clock)
@@ -76,17 +86,34 @@ def clock():
 
 
 @pytest.fixture()
-def db_path(tmp_path):
-    return tmp_path / "test.db"  # fresh database file per test
+def db_url(tmp_path):
+    """URL of a fresh, empty database for this test (SQLite file, or a throw-away PostgreSQL database)."""
+    if not ON_PG:
+        yield f"sqlite:///{(tmp_path / 'test.db').as_posix()}"
+        return
+    from sqlalchemy import create_engine, text
+    from sqlalchemy.engine import make_url
+    from app.db.session import normalize_url
+    base = make_url(normalize_url(PG_URL))
+    name = f"wswe_test_{uuid.uuid4().hex[:12]}"
+    admin = create_engine(base, isolation_level="AUTOCOMMIT")
+    with admin.connect() as c:
+        c.execute(text(f'CREATE DATABASE "{name}"'))
+    try:
+        yield base.set(database=name).render_as_string(hide_password=False)
+    finally:
+        with admin.connect() as c:
+            c.execute(text(f'DROP DATABASE IF EXISTS "{name}" WITH (FORCE)'))
+        admin.dispose()
 
 
 @pytest.fixture()
-def make(db_path):
+def make(db_url):
     """Factory for apps on this test's own database: make(clock=None, **settings_overrides)."""
     apps = []
 
     def factory(clock=None, **overrides):
-        a = make_app(db_path, clock, **overrides)
+        a = make_app(db_url, clock, **overrides)
         apps.append(a)
         return a
     yield factory

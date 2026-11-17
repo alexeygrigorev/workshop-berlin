@@ -14,16 +14,16 @@ from app.db.models import Base
 from app.db.session import Database, make_engine
 from app.main import create_app
 
-from .conftest import FAST, START, ContractClient, make_app
+from .conftest import FAST, ON_PG, START, ContractClient, make_app
 
 
 def sqlite_url(path) -> str:
-    return f"sqlite:///{path.as_posix()}"
+    return path if isinstance(path, str) else f"sqlite:///{path.as_posix()}"
 
 
 # ----------------------------------------------------------------------------- restart durability
-def test_data_survives_app_restart(db_path, clock):
-    app1 = make_app(db_path, clock)
+def test_data_survives_app_restart(db_url, clock):
+    app1 = make_app(db_url, clock)
     c1 = ContractClient(app1)
     r = c1.post("/v1/auth/sign-up", json={"email": "p@x.io", "password": "secret123"})
     assert r.status_code == 201
@@ -40,7 +40,7 @@ def test_data_survives_app_restart(db_path, clock):
     app1.state.db.dispose()
 
     # a brand new app instance on the same database file: nothing in memory carries over
-    app2 = make_app(db_path, clock)
+    app2 = make_app(db_url, clock)
     c2 = ContractClient(app2)
     assert c2.get("/v1/me", headers=h).json()["email"] == "p@x.io"  # session persisted (hash only in DB)
     assert c2.get("/v1/me", headers={"Authorization": f"Bearer {pat['token']}"}).status_code == 200  # PAT persisted
@@ -54,14 +54,14 @@ def test_data_survives_app_restart(db_path, clock):
     assert closed["status"] == "closed" and closed["winner_id"] == rest["id"]
     app2.state.db.dispose()
 
-    app3 = make_app(db_path, clock)
+    app3 = make_app(db_url, clock)
     again = ContractClient(app3).get(f"/v1/teams/{team['id']}/polls/{poll['id']}", headers=h).json()
     assert again["status"] == "closed" and again["final_scores"][0]["restaurant_id"] == rest["id"]
     app3.state.db.dispose()
 
 
-def test_tokens_are_stored_hashed_only(db_path, clock):
-    app = make_app(db_path, clock)
+def test_tokens_are_stored_hashed_only(db_url, clock):
+    app = make_app(db_url, clock)
     c = ContractClient(app)
     tok = c.post("/v1/auth/sign-up", json={"email": "h@x.io", "password": "secret123"}).json()["access_token"]
     h = {"Authorization": f"Bearer {tok}"}
@@ -73,8 +73,8 @@ def test_tokens_are_stored_hashed_only(db_path, clock):
     app.state.db.dispose()
 
 
-def test_seed_runs_only_into_empty_database(db_path, clock):
-    app = make_app(db_path, clock, seed_demo_data=True)
+def test_seed_runs_only_into_empty_database(db_url, clock):
+    app = make_app(db_url, clock, seed_demo_data=True)
     c = ContractClient(app)
     tok = c.post("/v1/auth/sign-in", json={"email": "anna@example.com", "password": "password123"}).json()
     c.cookies.clear()
@@ -82,7 +82,7 @@ def test_seed_runs_only_into_empty_database(db_path, clock):
     anna_id = tok["user"]["id"]
     assert c.patch("/v1/me", json={"display_name": "Anna Changed"}, headers=h).status_code == 200
     app.state.db.dispose()
-    app2 = make_app(db_path, clock, seed_demo_data=True)  # non-empty: no reseed, edits and sessions survive
+    app2 = make_app(db_url, clock, seed_demo_data=True)  # non-empty: no reseed, edits and sessions survive
     c2 = ContractClient(app2)
     me = c2.get("/v1/me", headers=h).json()
     assert me["id"] == anna_id and me["display_name"] == "Anna Changed"
@@ -91,14 +91,15 @@ def test_seed_runs_only_into_empty_database(db_path, clock):
     app2.state.db.dispose()
 
 
-def test_seed_disabled_leaves_database_empty(db_path):
-    app = make_app(db_path, None, seed_demo_data=False)
+def test_seed_disabled_leaves_database_empty(db_url):
+    app = make_app(db_url, None, seed_demo_data=False)
     with app.state.uow() as store:
         assert store.is_empty()
     app.state.db.dispose()
 
 
 # ----------------------------------------------------------------------------- configuration
+@pytest.mark.skipif(ON_PG, reason="SQLite file URL")
 def test_database_url_is_read_from_env(monkeypatch, tmp_path):
     assert Settings().database_url == "sqlite:///./wswe.db"
     url = sqlite_url(tmp_path / "from-env.db")
@@ -120,8 +121,9 @@ def test_auto_migrate_default_depends_on_backend():
     assert Settings(database_url="sqlite:///x.db", auto_migrate=False).should_auto_migrate is False
 
 
-def test_sqlite_foreign_keys_are_enforced(db_path):
-    db = Database(sqlite_url(db_path))
+@pytest.mark.skipif(ON_PG, reason="SQLite only")
+def test_sqlite_foreign_keys_are_enforced(db_url):
+    db = Database(sqlite_url(db_url))
     db.create_all()
     with db.engine.connect() as conn:
         assert conn.execute(text("PRAGMA foreign_keys")).scalar() == 1
@@ -129,8 +131,8 @@ def test_sqlite_foreign_keys_are_enforced(db_path):
 
 
 # ----------------------------------------------------------------------------- migrations
-def test_alembic_upgrade_head_on_empty_database_and_matches_models(tmp_path):
-    engine = make_engine(sqlite_url(tmp_path / "mig.db"))
+def test_alembic_upgrade_head_on_empty_database_and_matches_models(db_url):
+    engine = make_engine(db_url)
     migrate.upgrade(engine)
     tables = set(inspect(engine).get_table_names())
     assert set(Base.metadata.tables) <= tables and "alembic_version" in tables
@@ -142,19 +144,19 @@ def test_alembic_upgrade_head_on_empty_database_and_matches_models(tmp_path):
     engine.dispose()
 
 
-def test_migrated_schema_works_end_to_end(tmp_path, clock):
-    url = sqlite_url(tmp_path / "e2e.db")
-    app = create_app(Settings(database_url=url, seed_demo_data=True, **FAST), clock)  # auto-migrates, seeds
+def test_migrated_schema_works_end_to_end(db_url, clock):
+    # auto-migrates (explicitly on: it is off by default for PostgreSQL), seeds
+    app = create_app(Settings(database_url=db_url, seed_demo_data=True, auto_migrate=True, **FAST), clock)
     c = ContractClient(app)
     r = c.post("/v1/auth/sign-in", json={"email": "anna@example.com", "password": "password123"})
     assert r.status_code == 200
     app.state.db.dispose()
 
 
-def test_alembic_cli_env_uses_database_url(tmp_path, monkeypatch):
+def test_alembic_cli_env_uses_database_url(db_url, monkeypatch):
     from alembic import command
 
-    url = sqlite_url(tmp_path / "cli.db")
+    url = db_url
     monkeypatch.setenv("WSWE_DATABASE_URL", url)
     command.upgrade(migrate.alembic_config(), "head")  # same path as `uv run alembic upgrade head`
     engine = make_engine(url)
@@ -202,20 +204,33 @@ def test_ballot_replace_keeps_one_row_per_member(api, crew, app, clock):
         assert conn.execute(text("select count(*) from ballots")).scalar() == 1
 
 
-def test_database_constraints(db_path):
+def test_database_constraints(db_url):
+    import uuid
+    from sqlalchemy import insert
     from sqlalchemy.exc import IntegrityError
-    db = Database(sqlite_url(db_path))
+    from app.db.models import Membership, User
+    db = Database(db_url)
     db.create_all()
     now = START
+
+    def new_user():
+        return insert(User).values(id=uuid.uuid4(), email="dup@x.io", display_name="D", password_hash="h",
+                                   created_at=now)
     with db.engine.begin() as conn:
-        conn.execute(text("insert into users (id, email, display_name, password_hash, created_at) "
-                          "values ('a'||hex(randomblob(15)), 'dup@x.io', 'D', 'h', :n)"), {"n": now.isoformat()})
+        conn.execute(new_user())
     with pytest.raises(IntegrityError):  # unique email
         with db.engine.begin() as conn:
-            conn.execute(text("insert into users (id, email, display_name, password_hash, created_at) "
-                              "values ('b'||hex(randomblob(15)), 'dup@x.io', 'D', 'h', :n)"), {"n": now.isoformat()})
-    with pytest.raises(IntegrityError):  # foreign key (needs PRAGMA foreign_keys=ON)
+            conn.execute(new_user())
+    with pytest.raises(IntegrityError):  # foreign key (SQLite needs PRAGMA foreign_keys=ON)
         with db.engine.begin() as conn:
-            conn.execute(text("insert into memberships (team_id, user_id, role, joined_at) "
-                              "values ('nope', 'nope', 'admin', :n)"), {"n": now.isoformat()})
+            conn.execute(insert(Membership).values(team_id=uuid.uuid4(), user_id=uuid.uuid4(), role="admin",
+                                                   joined_at=now))
     db.dispose()
+
+
+def test_postgres_urls_are_normalised_to_psycopg():
+    from app.db.session import normalize_url
+    for u in ("postgres://u:p%40@h:5432/d", "postgresql://u:p%40@h:5432/d", "postgresql+psycopg://u:p%40@h:5432/d"):
+        assert normalize_url(u) == "postgresql+psycopg://u:p%40@h:5432/d"
+    assert normalize_url("sqlite:///x.db") == "sqlite:///x.db"
+    assert make_engine("postgresql://u:p@localhost/d").dialect.driver == "psycopg"  # lazy: does not connect
