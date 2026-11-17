@@ -74,23 +74,105 @@ jobs:
       - run: npm run build
       - run: npm run build:static
 
-  e2e:
+  # Builds the production image exactly once. e2e tests this image and deploy ships this image; both verify the
+  # tarball sha256 and the image ID against this job's outputs before using it.
+  build-image:
     runs-on: ubuntu-latest
-    timeout-minutes: 30
-    defaults:
-      run:
-        working-directory: e2e
+    timeout-minutes: 20
+    outputs:
+      image_tag: ${{ steps.manifest.outputs.image_tag }}
+      image_id: ${{ steps.manifest.outputs.image_id }}
+      tar_sha256: ${{ steps.manifest.outputs.tar_sha256 }}
+    env:
+      IMAGE_TAG: wswe:${{ github.sha }}
     steps:
       - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      # VITE_API_URL="" in the Dockerfile: same-origin frontend, no host baked in; runtime config comes from env.
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: false
+          load: true
+          tags: ${{ env.IMAGE_TAG }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+      - name: Smoke test (SQLite, no seed)
+        run: |
+          docker run -d --name smoke -p 8000:8000 -e WSWE_DATABASE_URL=sqlite:///:memory:             -e WSWE_AUTO_MIGRATE=true -e WSWE_SEED_DEMO_DATA=false "$IMAGE_TAG"
+          for i in $(seq 1 30); do
+            curl -fsS http://localhost:8000/v1/health && exit 0
+            sleep 2
+          done
+          docker logs smoke
+          echo "::error::smoke test failed"
+          exit 1
+      - name: Export image and record manifest
+        id: manifest
+        run: |
+          docker rm -f smoke >/dev/null 2>&1 || true
+          mkdir out
+          docker save "$IMAGE_TAG" | gzip -n > out/wswe-image.tar.gz
+          image_id="$(docker image inspect --format '{{.Id}}' "$IMAGE_TAG")"
+          tar_sha256="$(sha256sum out/wswe-image.tar.gz | cut -d' ' -f1)"
+          printf '{"image_tag":"%s","image_id":"%s","tar_sha256":"%s","commit":"%s"}
+'             "$IMAGE_TAG" "$image_id" "$tar_sha256" "$GITHUB_SHA" > out/image-manifest.json
+          cat out/image-manifest.json
+          ls -lh out
+          {
+            echo "image_tag=$IMAGE_TAG"
+            echo "image_id=$image_id"
+            echo "tar_sha256=$tar_sha256"
+          } >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: wswe-image
+          path: out/
+          retention-days: 1
+          compression-level: 0  # already gzipped
+
+  e2e:
+    needs: [build-image]
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    outputs:
+      tested_image_id: ${{ steps.tested.outputs.tested_image_id }}
+    env:
+      WSWE_IMAGE: ${{ needs.build-image.outputs.image_tag }}
+      WSWE_IMAGE_ID: ${{ needs.build-image.outputs.image_id }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wswe-image
+          path: image
+      - name: Verify and load the image
+        env:
+          EXPECTED_SHA256: ${{ needs.build-image.outputs.tar_sha256 }}
+        run: |
+          actual="$(sha256sum image/wswe-image.tar.gz | cut -d' ' -f1)"
+          echo "tarball sha256 EXPECTED $EXPECTED_SHA256 ACTUAL $actual"
+          [ -n "$EXPECTED_SHA256" ] && [ "$actual" = "$EXPECTED_SHA256" ]             || { echo "::error::image tarball sha256 mismatch"; exit 1; }
+          gunzip -c image/wswe-image.tar.gz | docker load
+          loaded="$(docker image inspect --format '{{.Id}}' "$WSWE_IMAGE")"
+          echo "image ID EXPECTED $WSWE_IMAGE_ID ACTUAL $loaded"
+          [ -n "$WSWE_IMAGE_ID" ] && [ "$loaded" = "$WSWE_IMAGE_ID" ]             || { echo "::error::loaded image ID mismatch"; exit 1; }
       - uses: actions/setup-node@v4
         with:
           node-version: 22
           cache: npm
           cache-dependency-path: e2e/package-lock.json
       - run: npm ci
+        working-directory: e2e
       - run: npx playwright install --with-deps chromium
-      # globalSetup starts (and tears down) its own docker compose project, wswe-e2e.
+        working-directory: e2e
+      # globalSetup starts (and tears down) its own docker compose project, wswe-e2e, from the prebuilt image
+      # (no build) and asserts the running app container uses image ID $WSWE_IMAGE_ID.
       - run: npx playwright test
+        working-directory: e2e
+      - name: Record the tested image ID
+        id: tested
+        run: echo "tested_image_id=$(docker image inspect --format '{{.Id}}' "$WSWE_IMAGE")" >> "$GITHUB_OUTPUT"
       - uses: actions/upload-artifact@v4
         if: failure()
         with:
@@ -101,30 +183,36 @@ jobs:
           retention-days: 7
           if-no-files-found: ignore
 
-  docker-build:
-    runs-on: ubuntu-latest
-    timeout-minutes: 20
-    steps:
-      - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
-      - uses: docker/build-push-action@v6
-        with:
-          context: .
-          push: false
-          tags: wswe:ci
-          cache-from: type=gha
-          cache-to: type=gha,mode=max
-
   deploy:
-    needs: [backend-tests, frontend-tests, e2e, docker-build]
+    needs: [backend-tests, frontend-tests, build-image, e2e]
     if: github.ref == 'refs/heads/main' && (github.event_name == 'push' || github.event_name == 'workflow_dispatch')
     runs-on: ubuntu-latest
     timeout-minutes: 30
     environment: production
     steps:
       - uses: actions/checkout@v4
+      - uses: actions/download-artifact@v4
+        with:
+          name: wswe-image
+          path: image
+      - name: Check that the image to deploy is the one that was tested
+        env:
+          BUILT_ID: ${{ needs.build-image.outputs.image_id }}
+          TESTED_ID: ${{ needs.e2e.outputs.tested_image_id }}
+          EXPECTED_SHA256: ${{ needs.build-image.outputs.tar_sha256 }}
+        run: |
+          echo "built  image ID: $BUILT_ID"
+          echo "tested image ID: $TESTED_ID"
+          [ -n "$BUILT_ID" ] && [ "$BUILT_ID" = "$TESTED_ID" ]             || { echo "::error::image deployed differs from the image e2e tested"; exit 1; }
+          actual="$(sha256sum image/wswe-image.tar.gz | cut -d' ' -f1)"
+          echo "tarball sha256 EXPECTED $EXPECTED_SHA256 ACTUAL $actual"
+          [ -n "$EXPECTED_SHA256" ] && [ "$actual" = "$EXPECTED_SHA256" ]             || { echo "::error::image tarball sha256 mismatch"; exit 1; }
       - name: Deploy over SSH
         env:
+          WSWE_IMAGE: ${{ needs.build-image.outputs.image_tag }}
+          WSWE_IMAGE_ID: ${{ needs.build-image.outputs.image_id }}
+          WSWE_IMAGE_SHA256: ${{ needs.build-image.outputs.tar_sha256 }}
+          WSWE_IMAGE_TAR: image/wswe-image.tar.gz
           DEPLOY_HOST: ${{ secrets.DEPLOY_HOST }}
           DEPLOY_USER: ${{ secrets.DEPLOY_USER }}
           DEPLOY_SSH_KEY: ${{ secrets.DEPLOY_SSH_KEY }}
